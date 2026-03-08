@@ -1036,7 +1036,7 @@ async def verify_and_correct_experts(experts: list, company_name: str, ticker: s
     gemini_evidence = {}
     try:
         msg = await client.messages.create(
-            model="gemini_3_flash", max_tokens=3000,
+            model="claude-3-5-haiku-20241022", max_tokens=3000,
             messages=[{"role": "user", "content":
                 f"Verify each person below. For EACH, on one line, state:\n"
                 f"- Their number\n"
@@ -1113,7 +1113,7 @@ Return ONLY valid JSON array."""
 
     try:
         msg = await client.messages.create(
-            model="gemini_3_flash", max_tokens=8192,
+            model="claude-3-5-haiku-20241022", max_tokens=8192,
             system="You output ONLY valid JSON arrays. No preamble, no commentary, no markdown. Start with [ end with ].",
             messages=[{"role": "user", "content": correction_prompt}]
         )
@@ -1240,7 +1240,7 @@ async def generate_company_profile(ticker: str, company_name: Optional[str] = No
         try:
             hint_note = f" (Note: the search dropdown suggested '{company_name}' but verify this against the web results.)" if company_name else ""
             id_msg = await client.messages.create(
-                model="claude_haiku_4_5", max_tokens=200,
+                model="claude-3-5-haiku-20241022", max_tokens=200,
                 system="You output ONLY the company name, nothing else. No quotes, no explanation.",
                 messages=[{"role": "user", "content": f"Based on these web search results, what is the publicly traded company with stock ticker '{ticker}' on NYSE or NASDAQ?{hint_note}\n\n{ticker_search}\n\nReturn ONLY the full company name."}]
             )
@@ -1296,7 +1296,7 @@ Use real competitor names, suppliers, regulatory bodies. Be accurate."""
     last_error = None
     for attempt in range(2):
         try:
-            msg = await client.messages.create(model="claude_haiku_4_5", max_tokens=2000,
+            msg = await client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=2000,
                                           messages=[{"role": "user", "content": prompt}])
             raw = msg.content[0].text
             print(f"[COMPANY] Attempt {attempt+1}: response length {len(raw)} chars")
@@ -1384,7 +1384,7 @@ Former employees: proximity 5. Competitors: 3-4. Suppliers/customers: 3."""
 
     last_error = None
     # Use Gemini Flash for fast generation — Sonnet handles verification/reconciliation
-    models_to_try = ["gemini_3_flash", "claude_sonnet_4_6"]
+    models_to_try = ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"]
     for attempt, model in enumerate(models_to_try):
         try:
             msg = await client.messages.create(
@@ -1462,7 +1462,7 @@ Return ONLY a JSON array of strings. No markdown."""
     last_error = None
     for attempt in range(2):
         try:
-            msg = await client.messages.create(model="claude_haiku_4_5", max_tokens=1000,
+            msg = await client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=1000,
                                           messages=[{"role": "user", "content": prompt}])
             raw = msg.content[0].text
             result = _extract_json(raw)
@@ -1887,7 +1887,7 @@ async def search_companies(q: str = Query(..., min_length=1)):
                 web_context = await ddg_search(f'{q.strip()} stock ticker NYSE NASDAQ company name', max_results=5)
                 print(f"[SEARCH-LLM] Web search for '{q.strip()}': {web_context[:200] if web_context else '(empty)'}")
                 msg = await client.messages.create(
-                    model="claude_haiku_4_5", max_tokens=500,
+                    model="claude-3-5-haiku-20241022", max_tokens=500,
                     messages=[{"role": "user", "content": f"""A financial professional searched "{q.strip()}" looking for a US-listed public stock.
 
 === WEB SEARCH RESULTS ===
@@ -2003,7 +2003,7 @@ Return ONLY a valid JSON array of objects (no markdown, no commentary):
 
     json_system = "You output ONLY valid JSON arrays. No preamble, no commentary, no markdown code blocks. Start with [ and end with ]."
 
-    models = ["gemini_3_flash", "claude_sonnet_4_6"]
+    models = ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"]
     for attempt, model in enumerate(models):
         try:
             msg = await client.messages.create(
@@ -2088,7 +2088,7 @@ Only real people. No fictional entries."""
     json_system = """You are an expert network researcher. Output ONLY valid JSON arrays — start with [ end with ]. No commentary, no explanations, no refusals.
 Source people from LinkedIn profiles, SEC filings, press releases, and conference bios. NEVER include annotations like "(approx.)" or "(unverified)" in any field — all data must be clean text. companyAffiliation must be accurate — omit a person rather than assign them to the wrong company. Return a JSON array of up to 5 candidates."""
 
-    models = ["gemini_3_flash", "claude_sonnet_4_6"]
+    models = ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"]
     for attempt, model in enumerate(models):
         try:
             msg = await client.messages.create(
@@ -2140,7 +2140,7 @@ async def resolve_entity_name(name: str) -> str:
             from anthropic import AsyncAnthropic
             client = AsyncAnthropic()
             msg = await client.messages.create(
-                model="gemini_3_flash", max_tokens=100,
+                model="claude-3-5-haiku-20241022", max_tokens=100,
                 messages=[{"role": "user", "content": f"What is the full company name for the US stock ticker '{stripped}'? Reply with ONLY the company name, nothing else. If unknown, reply UNKNOWN."}]
             )
             result = msg.content[0].text.strip().strip('"').strip("'")
@@ -2200,7 +2200,7 @@ Return ONLY a JSON array of objects (no markdown):
     json_system = """You are an expert network researcher. Output ONLY valid JSON arrays — start with [ end with ]. No commentary, no explanations, no refusals.
 Source people from LinkedIn profiles, SEC filings, press releases, and conference bios. NEVER include annotations like "(approx.)" or "(unverified)" in any field — all data must be clean text. companyAffiliation must be accurate — omit a person rather than assign them to the wrong company. We have a separate verification step."""
 
-    models = ["gemini_3_flash", "claude_sonnet_4_6"]
+    models = ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"]
     for attempt, model in enumerate(models):
         try:
             msg = await client.messages.create(
@@ -2271,7 +2271,7 @@ Return ONLY a JSON array of 10 objects:
 
 No markdown."""
 
-    models = ["gemini_3_flash", "claude_sonnet_4_6"]
+    models = ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"]
     for attempt, model in enumerate(models):
         try:
             msg = await client.messages.create(model=model, max_tokens=8192,
@@ -2450,7 +2450,7 @@ Return ONLY a JSON array (no markdown):
     json_system = """You are an expert network researcher. Output ONLY valid JSON arrays — start with [ end with ]. No commentary, no explanations, no refusals.
 Source people from LinkedIn profiles, conference bios, published work, and industry directories. NEVER include annotations like "(approx.)" or "(unverified)" in any field — all data must be clean text. companyAffiliation must be accurate — omit a person rather than guess their company."""
 
-    models = ["gemini_3_flash", "claude_sonnet_4_6"]
+    models = ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"]
     experts = None
     for attempt, model in enumerate(models):
         try:
@@ -2551,7 +2551,7 @@ Return ONLY valid JSON:
 
 Use real, accurate company names. Be specific."""
 
-    models = ["gemini_3_flash", "claude_haiku_4_5"]
+    models = ["claude-3-5-haiku-20241022", "claude-3-5-haiku-20241022"]
     for attempt, model in enumerate(models):
         try:
             msg = await client.messages.create(
@@ -2714,7 +2714,7 @@ Return a JSON array (empty array [] if none). Each item:
 Return ONLY the JSON array."""
         try:
             msg = await client.messages.create(
-                model="gemini_3_flash", max_tokens=2000,
+                model="claude-3-5-haiku-20241022", max_tokens=2000,
                 messages=[{"role": "user", "content": filter_prompt}]
             )
             publications = _extract_json(msg.content[0].text.strip())
@@ -2747,7 +2747,7 @@ JSON array:"""
 
     try:
         msg = await client.messages.create(
-            model="claude_haiku_4_5", max_tokens=2000,
+            model="claude-3-5-haiku-20241022", max_tokens=2000,
             messages=[{"role": "user", "content": pub_prompt}]
         )
         result_text = msg.content[0].text.strip()
