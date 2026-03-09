@@ -2154,10 +2154,129 @@ async def resolve_entity_name(name: str) -> str:
 
 
 # ============================================================
+# LLM — Resolve Generic Category to Specific Companies
+# ============================================================
+async def resolve_generic_entity(entity_name: str, entity_type: str, parent_company: str, parent_ticker: str) -> list:
+    """If entity_name is a generic category (e.g., 'Catering Companies', 'Regional Banks'),
+    resolve it to a list of specific real companies in the context of the parent company's industry.
+    Returns a list of specific company names, or empty list if entity_name is already specific."""
+    # Heuristic: generic categories often contain words like 'companies', 'firms', 'services', 'providers'
+    # or are plural descriptors rather than proper company names
+    generic_indicators = [
+        'companies', 'firms', 'services', 'providers', 'agencies', 'organizations',
+        'institutions', 'groups', 'associations', 'networks', 'operators', 'manufacturers',
+        'distributors', 'retailers', 'suppliers', 'vendors', 'contractors', 'consultants',
+        'banks', 'funds', 'insurers', 'carriers', 'airlines', 'utilities',
+        'authorities', 'regulators', 'bureaus', 'departments', 'commissions',
+        'independent', 'regional', 'local', 'national', 'global', 'international',
+        'third-party', 'specialty', 'boutique', 'mid-size', 'small-cap', 'large-cap',
+        'producers', 'refiners', 'processors', 'dealers', 'brokers', 'lenders',
+        'startups', 'players', 'entrants', 'incumbents', 'conglomerates',
+        'cooperatives', 'unions', 'councils', 'boards', 'exchanges'
+    ]
+    name_lower = entity_name.lower().strip()
+    name_words = name_lower.split()
+    is_generic = any(word in name_words for word in generic_indicators)
+
+    # Also check: if it doesn't look like a proper company name
+    # A proper company name like "LSG Sky Chefs" or "Gate Gourmet" is specific.
+    # "Catering Companies" or "Aviation MRO Providers" is generic.
+    if not is_generic:
+        words = entity_name.split()
+        if len(words) >= 2 and all(w[0].isupper() for w in words):
+            # Check if last word is a category word
+            if words[-1].lower() in generic_indicators:
+                is_generic = True
+
+    # Also detect if the name is NOT found as a known company in WELL_KNOWN_COMPANIES
+    # and doesn't look like a proper noun pattern (e.g., contains no numbers, no Inc/Corp/Ltd)
+    if not is_generic:
+        # Check if it matches any known company name
+        is_known = any(entity_name.lower() == v.lower() for v in WELL_KNOWN_COMPANIES.values())
+        if not is_known:
+            # Check for common company suffixes that indicate a real company
+            company_suffixes = ['inc', 'corp', 'ltd', 'llc', 'plc', 'co', 'sa', 'ag', 'gmbh', 'nv', 'se']
+            has_suffix = any(name_lower.endswith(f' {s}') or name_lower.endswith(f' {s}.') for s in company_suffixes)
+            if not has_suffix:
+                # Last resort: check if the name ends in a plural noun (likely a category)
+                if name_lower.endswith('ers') or name_lower.endswith('ors') or name_lower.endswith('ies'):
+                    is_generic = True
+
+    if not is_generic:
+        return []  # Not generic — treat as a specific company name
+
+    print(f"[GENERIC-ENTITY] Detected generic category: '{entity_name}' — resolving to specific companies")
+
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic()
+
+    # Use LLM to resolve to specific companies, with web search for context
+    search_q = f"{parent_company} {entity_type} {entity_name} specific companies"
+    web_context = await ddg_search(search_q)
+
+    resolve_prompt = f"""The entity "{entity_name}" is listed as a {entity_type} category for {parent_company} ({parent_ticker}).
+This is a GENERIC category, not a specific company. I need you to identify 3-5 specific, real companies that fall into this category AND are relevant to {parent_company}'s business.
+
+{f'Web context: {web_context}' if web_context else ''}
+
+IMPORTANT:
+- These must be REAL companies that actually operate as {entity_type}s in {parent_company}'s specific industry/sector.
+- Be industry-specific. For example, if {parent_company} is an airline and the category is "Catering Companies", return AIRLINE catering companies like LSG Sky Chefs, Gate Gourmet, DO & CO — NOT general restaurant catering companies.
+- If {parent_company} is a construction company and the category is "Equipment Suppliers", return construction equipment companies like Caterpillar, John Deere — NOT office equipment suppliers.
+- The context of {parent_company}'s industry is CRITICAL for accuracy.
+
+Return ONLY a JSON array of company name strings. Example: ["LSG Sky Chefs", "Gate Gourmet", "DO & CO"]
+No markdown, no explanation."""
+
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=500,
+            messages=[{"role": "user", "content": resolve_prompt}]
+        )
+        raw = msg.content[0].text.strip()
+        companies = _extract_json(raw)
+        if isinstance(companies, list) and len(companies) > 0 and all(isinstance(c, str) for c in companies):
+            print(f"[GENERIC-ENTITY] Resolved '{entity_name}' -> {companies}")
+            return companies[:5]
+    except Exception as e:
+        print(f"[GENERIC-ENTITY] Resolution failed for '{entity_name}': {e}")
+
+    return []
+
+
+# ============================================================
 # LLM — Entity Expert Generation (for clicking companies in ecosystem lists)
 # ============================================================
 async def generate_entity_experts(entity_name: str, entity_type: str, parent_company: str, parent_ticker: str) -> list:
-    """Generate experts from a specific entity in the ecosystem."""
+    """Generate experts from a specific entity in the ecosystem.
+    If entity_name is a generic category, resolves to specific companies first."""
+    global next_expert_id
+
+    # Step 1: Check if this is a generic category and resolve to specific companies
+    specific_companies = await resolve_generic_entity(entity_name, entity_type, parent_company, parent_ticker)
+    if specific_companies:
+        # Generate experts from each specific company in parallel
+        print(f"[ENTITY-EXPERTS] Generating experts from {len(specific_companies)} specific companies for generic '{entity_name}'")
+        all_experts = []
+        tasks = [
+            _generate_entity_experts_for_company(company, entity_type, parent_company, parent_ticker)
+            for company in specific_companies
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for company, result in zip(specific_companies, results):
+            if isinstance(result, list):
+                all_experts.extend(result)
+            elif isinstance(result, Exception):
+                print(f"[ENTITY-EXPERTS] Failed for {company}: {result}")
+        # Return up to 5 best experts across all companies
+        return all_experts[:5]
+
+    # Step 2: Specific company name — generate directly
+    return await _generate_entity_experts_for_company(entity_name, entity_type, parent_company, parent_ticker)
+
+
+async def _generate_entity_experts_for_company(entity_name: str, entity_type: str, parent_company: str, parent_ticker: str) -> list:
+    """Generate experts from a specific named company."""
     global next_expert_id
     from anthropic import AsyncAnthropic
     client = AsyncAnthropic()
@@ -2177,7 +2296,7 @@ async def generate_entity_experts(entity_name: str, entity_type: str, parent_com
     if search_context:
         print(f"[ENTITY-SEARCH] Web search returned {len(search_context)} chars for {entity_name}")
 
-    prompt = f"""Generate up to 5 expert profiles of VP/Director-level individuals at {entity_name} relevant to researching {parent_company} ({parent_ticker}).
+    prompt = f"""Generate up to 3 expert profiles of VP/Director-level individuals at {entity_name} relevant to researching {parent_company} ({parent_ticker}).
 
 Relationship: {entity_name} is a {entity_type} of {parent_company}.
 
@@ -2384,6 +2503,10 @@ async def get_entity_experts(request: Request):
         # Return with resolved name so frontend can display it
         if resolved_name != entity_name:
             return {"experts": experts, "resolvedName": resolved_name}
+        # If experts came from multiple companies (generic category), always return structured
+        affiliations = set(e.get("companyAffiliation", "") for e in experts if e.get("companyAffiliation"))
+        if len(affiliations) > 1:
+            return {"experts": experts, "resolvedCompanies": list(affiliations)}
         return experts
     except Exception as e:
         traceback.print_exc()

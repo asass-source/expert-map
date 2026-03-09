@@ -665,23 +665,38 @@ function EntityExpertsPanel({ entityName, entityType, parentTicker, parentCompan
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [displayName, setDisplayName] = useState(entityName);
+  const [resolvedCompanies, setResolvedCompanies] = useState(null);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
     setDisplayName(entityName);
+    setResolvedCompanies(null);
     apiFetch('/api/entity-experts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ entityName, entityType, parentTicker })
     })
       .then(data => {
-        // Handle resolved name response: { experts: [...], resolvedName: "..." }
+        // Handle resolved name response: { experts: [...], resolvedName: "...", resolvedCompanies: [...] }
+        let expertList;
         if (data && !Array.isArray(data) && data.experts) {
-          setExperts(data.experts);
+          expertList = data.experts;
           if (data.resolvedName) setDisplayName(data.resolvedName);
+          if (data.resolvedCompanies) setResolvedCompanies(data.resolvedCompanies);
         } else {
-          setExperts(data);
+          expertList = data;
+        }
+        setExperts(expertList);
+        // Register entity experts in sessionCache so bio/questions/publications work
+        if (Array.isArray(expertList) && expertList.length > 0 && parentTicker) {
+          const existing = sessionCache.experts[parentTicker] || [];
+          for (const e of expertList) {
+            if (!existing.some(ex => ex.id === e.id)) {
+              existing.push(e);
+            }
+          }
+          sessionCache.experts[parentTicker] = existing;
         }
         setLoading(false);
       })
@@ -702,7 +717,10 @@ function EntityExpertsPanel({ entityName, entityType, parentTicker, parentCompan
         React.createElement('div', { className: 'flex items-start justify-between' },
           React.createElement('div', null,
             React.createElement('h2', { className: 'text-lg font-semibold text-white' }, displayName),
-            React.createElement('p', { className: 'text-sm text-gray-400 mt-0.5' }, `${entityTypeLabels[entityType] || entityType} of ${parentCompany}`)
+            React.createElement('p', { className: 'text-sm text-gray-400 mt-0.5' }, `${entityTypeLabels[entityType] || entityType} of ${parentCompany}`),
+            resolvedCompanies && React.createElement('p', { className: 'text-[11px] text-teal-400/70 mt-1' },
+              `Sourced from: ${resolvedCompanies.join(', ')}`
+            )
           ),
           React.createElement('button', {
             onClick: onClose,
@@ -760,7 +778,20 @@ function ExecExpertsPanel({ exec, ticker, companyName, onClose }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ execName: exec.name, execTitle: exec.title })
     })
-      .then(data => { setExperts(data); setLoading(false); })
+      .then(data => {
+        setExperts(data);
+        // Register exec-experts in sessionCache so bio/questions/publications work
+        if (Array.isArray(data) && data.length > 0 && ticker) {
+          const existing = sessionCache.experts[ticker] || [];
+          for (const e of data) {
+            if (!existing.some(ex => ex.id === e.id)) {
+              existing.push(e);
+            }
+          }
+          sessionCache.experts[ticker] = existing;
+        }
+        setLoading(false);
+      })
       .catch(err => { setError(err.message); setLoading(false); });
   }, [exec.name, exec.title, ticker]);
 
