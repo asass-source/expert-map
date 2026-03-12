@@ -1260,7 +1260,8 @@ async def generate_company_profile(ticker: str, company_name: Optional[str] = No
     search_name = company_name or ticker
     eco_queries = [
         f'{search_name} competitors market',
-        f'{search_name} suppliers customers business',
+        f'{search_name} major suppliers customers distributors partners',
+        f'{search_name} supply chain key accounts distribution partners',
     ]
     eco_results = await asyncio.gather(*[ddg_search(q) for q in eco_queries], return_exceptions=True)
     eco_parts = [r for r in eco_results if isinstance(r, str) and r.strip()]
@@ -1286,12 +1287,20 @@ IMPORTANT: Use the web research context above to ensure accuracy. {ticker} is th
   "competitors": ["Comp1", "Comp2", "Comp3", "Comp4", "Comp5"],
   "suppliers": ["Sup1", "Sup2", "Sup3", "Sup4", "Sup5"],
   "customers": ["Cust1", "Cust2", "Cust3", "Cust4"],
-  "distributors": ["Chan1", "Chan2", "Chan3", "Chan4"],
+  "distributors": ["Dist1", "Dist2", "Dist3", "Dist4"],
   "regulators": ["Reg1", "Reg2", "Reg3"],
   "industryBodies": ["Body1", "Body2", "Body3"]
 }}
 
-Use real competitor names, suppliers, regulatory bodies. Be accurate."""
+CRITICAL RULES FOR ALL LISTS:
+- ALWAYS use SPECIFIC, REAL company names — NEVER generic categories.
+- WRONG: "Wholesale Distributors", "Screen Printers", "Cotton Suppliers", "Regional Banks", "Catering Companies"
+- RIGHT: "AlphaBroder", "SanMar", "S&S Activewear", "JPMorgan Chase", "LSG Sky Chefs"
+- Every entry in competitors, suppliers, customers, and distributors MUST be a real, named company or organization.
+- If you're unsure of specific names, use the web research context above or your knowledge of the industry.
+- For endMarkets, broad market descriptions are OK (e.g., "Activewear", "Retail Apparel").
+- For regulators and industryBodies, organization names are expected (e.g., "SEC", "EPA", "OSHA").
+- Be accurate. Use real names from the industry."""
 
     last_error = None
     for attempt in range(2):
