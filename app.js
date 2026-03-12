@@ -483,6 +483,7 @@ function useCompanyData(ticker) {
     delete sessionCache.companyProfiles[ticker];
     delete sessionCache.experts[ticker];
     delete sessionCache.executives[ticker];
+    if (sessionCache._formerEmployees) delete sessionCache._formerEmployees[ticker];
     setCompany(null);
     setExperts([]);
     setLoading(true);
@@ -1075,6 +1076,134 @@ function ExecutivesSection({ ticker, companyName }) {
 }
 
 // ============================================================
+// FORMER EMPLOYEES SECTION
+// ============================================================
+function FormerEmployeesSection({ ticker, companyName }) {
+  const [employees, setEmployees] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!ticker) return;
+    // Check session cache
+    if (sessionCache._formerEmployees && sessionCache._formerEmployees[ticker]) {
+      setEmployees(sessionCache._formerEmployees[ticker]);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    apiFetch(`/api/former-employees/${encodeURIComponent(ticker)}`)
+      .then(data => {
+        setEmployees(data);
+        if (!sessionCache._formerEmployees) sessionCache._formerEmployees = {};
+        sessionCache._formerEmployees[ticker] = data;
+        // Also register in experts cache so bio/questions work
+        if (Array.isArray(data) && data.length > 0 && ticker) {
+          const existing = sessionCache.experts[ticker] || [];
+          for (const e of data) {
+            if (!existing.some(ex => ex.id === e.id)) {
+              existing.push(e);
+            }
+          }
+          sessionCache.experts[ticker] = existing;
+        }
+        setLoading(false);
+      })
+      .catch(err => { setError(err.message); setLoading(false); });
+  }, [ticker]);
+
+  if (loading) return React.createElement('div', { className: 'bg-white/[0.03] rounded-xl border border-white/5 p-4' },
+    React.createElement('div', { className: 'flex items-center gap-3' },
+      React.createElement('div', { className: 'w-4 h-4 border-2 border-amber-400/30 border-t-amber-400 rounded-full', style: { animation: 'spin 1s linear infinite' } }),
+      React.createElement('span', { className: 'text-xs text-gray-400' }, 'Finding former senior employees...')
+    )
+  );
+  if (error) return React.createElement('div', { className: 'bg-white/[0.03] rounded-xl border border-white/5 p-4' },
+    React.createElement('p', { className: 'text-xs text-red-400' }, `Error: ${error}`)
+  );
+  if (!employees || employees.length === 0) return null;
+
+  // Group by level
+  const levelOrder = ['C-Suite', 'SVP', 'VP', 'Managing Director'];
+  const grouped = {};
+  for (const emp of employees) {
+    const lvl = emp.level || 'VP';
+    if (!grouped[lvl]) grouped[lvl] = [];
+    grouped[lvl].push(emp);
+  }
+
+  const levelColors = {
+    'C-Suite': 'text-amber-400',
+    'SVP': 'text-orange-400',
+    'VP': 'text-teal-400',
+    'Managing Director': 'text-blue-400'
+  };
+
+  return React.createElement('div', { className: 'bg-white/[0.03] rounded-xl border border-white/5 overflow-hidden' },
+    React.createElement('button', {
+      onClick: () => setIsExpanded(!isExpanded),
+      className: 'w-full flex items-center justify-between px-5 py-4 hover:bg-white/[0.02] transition-colors'
+    },
+      React.createElement('div', { className: 'flex items-center gap-3' },
+        React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, className: 'text-amber-400' },
+          React.createElement('path', { d: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' })
+        ),
+        React.createElement('h3', { className: 'text-sm font-medium text-white' }, 'Former Employees'),
+        React.createElement('span', { className: 'text-[11px] text-gray-500' }, `${employees.length} former C-Suite, SVP, VP & MD professionals`)
+      ),
+      React.createElement('svg', {
+        width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2,
+        className: cn('text-gray-500 transition-transform', isExpanded && 'rotate-180')
+      },
+        React.createElement('path', { d: 'M19 9l-7 7-7-7' })
+      )
+    ),
+    isExpanded && React.createElement('div', { className: 'border-t border-white/5 px-5 py-4 space-y-4' },
+      levelOrder.filter(lvl => grouped[lvl] && grouped[lvl].length > 0).map(lvl =>
+        React.createElement('div', { key: lvl },
+          React.createElement('div', { className: 'flex items-center gap-2 mb-2' },
+            React.createElement('span', { className: cn('text-[10px] font-semibold uppercase tracking-wider', levelColors[lvl] || 'text-gray-400') }, lvl),
+            React.createElement('span', { className: 'text-[10px] text-gray-600' }, `(${grouped[lvl].length})`)
+          ),
+          React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-2' },
+            grouped[lvl].map(emp =>
+              React.createElement('div', {
+                key: emp.id,
+                className: 'bg-white/[0.02] rounded-lg border border-white/5 p-3 hover:bg-white/[0.04] transition-colors'
+              },
+                React.createElement('div', { className: 'flex items-start justify-between gap-2' },
+                  React.createElement('div', { className: 'min-w-0 flex-1' },
+                    React.createElement(ExpertName, { expert: emp, className: 'text-xs font-medium text-white' }),
+                    React.createElement('div', { className: 'text-[10px] text-gray-400 mt-0.5 truncate' }, formatCurrentRole(emp)),
+                    emp.formerRole && emp.formerRole !== 'N/A' && React.createElement('div', { className: 'text-[10px] text-gray-500 mt-0.5 truncate' },
+                      React.createElement('span', { className: 'text-amber-400/60' }, 'Previously: '), emp.formerRole
+                    ),
+                    emp.yearsAtCompany && React.createElement('div', { className: 'text-[10px] text-gray-600 mt-0.5' }, emp.yearsAtCompany),
+                    emp.connectionToCompany && React.createElement('div', { className: 'text-[10px] text-gray-300 mt-1' },
+                      emp.connectionToCompany
+                    )
+                  )
+                ),
+                React.createElement('div', { className: 'flex items-center gap-1.5 mt-2' },
+                  React.createElement(EmailExpertButton, { expert: emp, companyName }),
+                  React.createElement(LinkedInButton, { url: emp.linkedinUrl, name: emp.name, expert: emp }),
+                  (emp.expertise || []).length > 0 && React.createElement('div', { className: 'flex gap-1 ml-1' },
+                    emp.expertise.slice(0, 2).map((ex, j) =>
+                      React.createElement('span', { key: j, className: 'text-[8px] px-1.5 py-0.5 rounded bg-white/5 text-gray-500' }, ex)
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+// ============================================================
 // SCREEN 1: COMPANY RESEARCH
 // ============================================================
 function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
@@ -1205,6 +1334,9 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
 
     // Executives Section
     React.createElement(ExecutivesSection, { ticker: company.ticker, companyName: company.name }),
+
+    // Former Employees Section
+    React.createElement(FormerEmployeesSection, { ticker: company.ticker, companyName: company.name }),
 
     // Ecosystem Grid — editable items with add/edit/delete
     React.createElement('div', { className: 'grid grid-cols-2 xl:grid-cols-3 gap-4' },

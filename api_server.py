@@ -50,6 +50,7 @@ executives_cache: dict = {}  # ticker -> list of executive dicts
 exec_experts_cache: dict = {} # "ticker:exec_name" -> list of experts
 entity_experts_cache: dict = {} # "entity_name" -> list of experts
 directory_experts_cache: dict = {} # ticker -> list of expert dicts (different from experts_cache)
+former_employees_cache: dict = {} # ticker -> list of former employee expert dicts
 next_expert_id = 1
 
 def mem_or_disk(mem_cache: dict, prefix: str, key: str):
@@ -1788,12 +1789,12 @@ async def get_company_full(ticker: str, request: Request):
     if refresh:
         print(f"[REFRESH] Force-regenerating {ticker} — clearing all caches")
         # Clear all caches for this ticker
-        for cache in [company_cache, experts_cache, executives_cache, questions_cache, entity_experts_cache, exec_experts_cache]:
+        for cache in [company_cache, experts_cache, executives_cache, questions_cache, entity_experts_cache, exec_experts_cache, former_employees_cache]:
             keys_to_remove = [k for k in cache if k == ticker or k.startswith(f"{ticker}:")]
             for k in keys_to_remove:
                 del cache[k]
         # Also clear disk cache for this ticker
-        for prefix in ["company", "experts", "execs", "questions", "ent_exp", "exec_exp"]:
+        for prefix in ["company", "experts", "execs", "questions", "ent_exp", "exec_exp", "former_emp"]:
             p = _cache_path(prefix, ticker)
             if p.exists():
                 p.unlink()
@@ -2237,6 +2238,128 @@ Source people from LinkedIn profiles, SEC filings, press releases, and conferenc
 
 
 # ============================================================
+# LLM — Former Employees Generation
+# ============================================================
+async def generate_former_employees(ticker: str, company_name: str) -> list:
+    """Generate a list of notable former C-Suite, SVP, VP, and MD employees of a company."""
+    global next_expert_id
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic()
+
+    # Web search for former executives / senior employees
+    search_queries = [
+        f'{company_name} former CEO CFO COO executive left departed',
+        f'{company_name} former SVP VP Managing Director alumni',
+        f'{company_name} {ticker} executive departure resignation retirement',
+    ]
+    search_tasks = [ddg_search(q) for q in search_queries]
+    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+    context_parts = []
+    for q, r in zip(search_queries, search_results):
+        if isinstance(r, str) and r.strip():
+            context_parts.append(f"Search: {q}\n{r}")
+    search_context = "\n\n".join(context_parts)
+    if search_context:
+        print(f"[FORMER-EMP] Web search returned {len(search_context)} chars for {ticker}")
+    else:
+        print(f"[FORMER-EMP] No web results for {ticker} former employees")
+
+    prompt = f"""Find 10-15 real former senior employees of {company_name} ({ticker}) who have LEFT the company.
+
+=== WEB RESEARCH (use as PRIMARY source) ===
+{search_context or "(No web context — use publicly known individuals.)"}
+=== END ===
+
+I need former employees at these levels:
+- Former C-Suite (CEO, CFO, COO, CTO, CMO, CHRO, CIO, CLO, etc.)
+- Former SVP / Executive Vice President
+- Former VP / Vice President
+- Former Managing Director
+
+These must be people who PREVIOUSLY worked at {company_name} and have SINCE LEFT.
+They should now be at other companies, retired, or in advisory roles.
+
+For each person provide:
+- Their full name
+- Their FORMER title at {company_name}
+- Their CURRENT role and CURRENT company (where they work NOW)
+- A brief note on their connection to {company_name}
+
+CRITICAL ACCURACY RULES:
+- ONLY include people whose names appear in the web research above, or are well-known publicly documented former employees.
+- Names and titles MUST match what is publicly documented.
+- companyAffiliation must be the EXACT company where the person CURRENTLY works. Getting this wrong is unacceptable.
+- formerRole must be their ACTUAL title when they were at {company_name}.
+- NEVER include annotations like "(approx.)", "(unverified)", or "(estimated)" in any field.
+- If you are not confident about a person's current company, DO NOT include them.
+- Return fewer results rather than include wrong information.
+- Do NOT include anyone who is CURRENTLY at {company_name}.
+
+Return ONLY a JSON array of objects:
+[{{
+  "name": "Real Full Name",
+  "formerTitle": "Former Title at {company_name}",
+  "currentRole": "Current Title, Current Company",
+  "companyAffiliation": "Current Company",
+  "level": "C-Suite" | "SVP" | "VP" | "Managing Director",
+  "yearsAtCompany": "e.g. 2015-2021",
+  "expertise": ["Area1", "Area2", "Area3"],
+  "yearsExperience": 20,
+  "connectionToCompany": "1-2 sentence connection to {company_name}",
+  "linkedinUrl": "https://linkedin.com/in/slug or empty string",
+  "sourceNote": "How identified"
+}}]
+
+Only real people. No fictional entries."""
+
+    json_system = """You are an expert network researcher. Output ONLY valid JSON arrays — start with [ end with ]. No commentary, no explanations, no refusals.
+Source people from LinkedIn profiles, SEC filings, press releases, and conference bios. NEVER include annotations like "(approx.)" or "(unverified)" in any field — all data must be clean text. companyAffiliation must be accurate — omit a person rather than assign them to the wrong company. Return a JSON array of up to 15 candidates."""
+
+    models = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"]
+    for attempt, model in enumerate(models):
+        try:
+            msg = await client.messages.create(
+                model=model, max_tokens=5000,
+                system=json_system,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw = msg.content[0].text
+            print(f"[FORMER-EMP] Attempt {attempt+1} ({model}): {len(raw)} chars")
+            data = _extract_json(raw)
+            if isinstance(data, dict) and "employees" in data:
+                data = data["employees"]
+            if isinstance(data, dict) and "former_employees" in data:
+                data = data["former_employees"]
+            if not isinstance(data, list):
+                raise ValueError(f"Expected list, got {type(data).__name__}")
+            # Convert to expert format for consistency
+            experts = []
+            for emp in data[:15]:
+                expert = {
+                    "id": next_expert_id,
+                    "name": emp.get("name", ""),
+                    "currentRole": emp.get("currentRole", ""),
+                    "formerRole": f"Former {emp.get('formerTitle', '')} at {company_name}",
+                    "companyAffiliation": emp.get("companyAffiliation", ""),
+                    "ecosystemNode": "formerEmployee",
+                    "expertise": emp.get("expertise", []),
+                    "yearsExperience": emp.get("yearsExperience", 15),
+                    "connectionToCompany": emp.get("connectionToCompany", ""),
+                    "linkedinUrl": emp.get("linkedinUrl", ""),
+                    "sourceNote": emp.get("sourceNote", ""),
+                    "level": emp.get("level", "VP"),
+                    "yearsAtCompany": emp.get("yearsAtCompany", ""),
+                    "score": emp.get("score", {"proximity": 5, "recency": 4, "relevance": 5, "uniqueness": 4}),
+                }
+                next_expert_id += 1
+                experts.append(expert)
+            return sanitize_experts(experts)
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[FORMER-EMP] Attempt {attempt+1} ({model}) failed: {e}")
+    return []
+
+
+# ============================================================
 # Resolve entity names — ticker-like strings get expanded to full company names
 # ============================================================
 async def resolve_entity_name(name: str) -> str:
@@ -2554,6 +2677,32 @@ async def get_executives_endpoint(ticker: str):
         execs = await generate_executives(ticker, company_name)
         executives_cache[ticker] = execs
         return execs
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/api/former-employees/{ticker}")
+async def get_former_employees_endpoint(ticker: str):
+    """Return former C-Suite/SVP/VP/MD employees for a company."""
+    ticker = ticker.upper().replace("-", ".")
+    cached = mem_or_disk(former_employees_cache, "former_emp", ticker)
+    if cached is not None:
+        return cached
+
+    company_name = company_cache.get(ticker, {}).get("name") or WELL_KNOWN_COMPANIES.get(ticker, ticker)
+    try:
+        employees = await generate_former_employees(ticker, company_name)
+        # Verify against web search
+        employees = await verify_and_correct_experts(employees, company_name, ticker)
+        save_both(former_employees_cache, "former_emp", ticker, employees)
+        # Also register in experts_cache so bio/questions/publications work
+        all_experts = experts_cache.get(ticker, [])
+        for e in employees:
+            if not any(ex["id"] == e["id"] for ex in all_experts):
+                all_experts.append(e)
+        save_both(experts_cache, "experts", ticker, all_experts)
+        return employees
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=422, detail=str(e))
