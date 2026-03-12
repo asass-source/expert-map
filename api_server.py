@@ -2394,11 +2394,16 @@ async def _generate_entity_experts_for_company(entity_name: str, entity_type: st
     from anthropic import AsyncAnthropic
     client = AsyncAnthropic()
 
-    # Web search for entity leadership using DuckDuckGo
+    # Determine if entity is likely a private company (not in well-known public tickers)
+    is_likely_private = not any(entity_name.lower() == v.lower() for v in WELL_KNOWN_COMPANIES.values())
+
+    # Web search for entity leadership using DuckDuckGo — broader queries for private companies
     search_queries = [
-        f'"{entity_name}" VP SVP Director executive leadership team',
-        f'"{entity_name}" "{parent_company}" {entity_type} relationship',
+        f'"{entity_name}" leadership team executive VP Director',
+        f'"{entity_name}" "{parent_company}" {entity_type}',
     ]
+    if is_likely_private:
+        search_queries.append(f'"{entity_name}" CEO President COO management team')
     search_tasks = [ddg_search(q) for q in search_queries]
     search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
     context_parts = []
@@ -2409,28 +2414,31 @@ async def _generate_entity_experts_for_company(entity_name: str, entity_type: st
     if search_context:
         print(f"[ENTITY-SEARCH] Web search returned {len(search_context)} chars for {entity_name}")
 
-    prompt = f"""Generate up to 3 expert profiles of VP/Director-level individuals at {entity_name} relevant to researching {parent_company} ({parent_ticker}).
+    c_suite_rule = "C-Suite (CEO, CFO, COO, etc.) is allowed for private companies." if is_likely_private else "NO C-Suite from public companies (VP/SVP/EVP/Director only). C-level OK for private companies."
+
+    prompt = f"""Generate up to 3 expert profiles of senior individuals at {entity_name} relevant to researching {parent_company} ({parent_ticker}).
 
 Relationship: {entity_name} is a {entity_type} of {parent_company}.
 
 === WEB CONTEXT ===
-{search_context or "(No web context — use publicly known individuals.)"}
+{search_context or "(No web context — use your knowledge of this company and industry.)"}
 === END ===
 
-CRITICAL ACCURACY RULES:
-- Real verifiable individuals ONLY. NO C-Suite from public companies (VP/SVP/EVP/Director only). C-level OK for private companies.
-- MOST IMPORTANT: Every expert MUST actually work (or have recently worked) at {entity_name} specifically — NOT at a different company in the same industry.
-- Do NOT confuse people who work at similar/related companies. For example, if asked about Lufthansa Technik experts, only list people who work at Lufthansa Technik, not at Delta TechOps or any other MRO.
-- Each person's name, current title, and company should be accurate. If the web research above names specific people with specific titles, use those EXACTLY.
-- If you cannot find enough real people who verifiably work at {entity_name}, return fewer experts rather than guessing or fabricating.
-- NEVER include annotations like "(approx.)", "(unverified)", or "(estimated)" in any field. All data must be clean text.
-- companyAffiliation must be "{entity_name}" for every expert returned. If someone doesn't actually work at {entity_name}, do NOT include them.
+RULES:
+- {c_suite_rule}
+- Every expert MUST actually work (or have recently worked) at {entity_name} specifically — NOT at a different company in the same industry.
+- Do NOT confuse people who work at similar/related companies.
+- If the web research names specific people with specific titles, use those EXACTLY.
+- Use your knowledge of this company's leadership if web results are sparse — {entity_name} is a well-known company in its industry.
+- NEVER include annotations like "(approx.)", "(unverified)", or "(estimated)" in any field.
+- companyAffiliation must be "{entity_name}" for every expert.
+- You MUST return at least 1 expert. Only return an empty array if {entity_name} truly does not exist as a company.
 
 Return ONLY a JSON array of objects (no markdown):
 {{"name": "Real Full Name", "currentRole": "EXACT Title at {entity_name}", "formerRole": "Former role or N/A", "companyAffiliation": "{entity_name}", "ecosystemNode": "{entity_type}", "expertise": ["Area1", "Area2", "Area3"], "yearsExperience": 15, "connectionToCompany": "Connection to {parent_company}", "score": {{"proximity": 3, "recency": 4, "relevance": 4, "uniqueness": 4}}, "linkedinUrl": "", "sourceNote": "How identified"}}"""
 
     json_system = """You are an expert network researcher. Output ONLY valid JSON arrays — start with [ end with ]. No commentary, no explanations, no refusals.
-Source people from LinkedIn profiles, SEC filings, press releases, and conference bios. NEVER include annotations like "(approx.)" or "(unverified)" in any field — all data must be clean text. companyAffiliation must be accurate — omit a person rather than assign them to the wrong company. We have a separate verification step."""
+Source people from LinkedIn profiles, SEC filings, press releases, and conference bios. NEVER include annotations like "(approx.)" or "(unverified)" in any field — all data must be clean text. companyAffiliation must be accurate. You MUST always return at least one expert for any real, named company — an empty array is only acceptable if the company does not exist."""
 
     models = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"]
     for attempt, model in enumerate(models):
