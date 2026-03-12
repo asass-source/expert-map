@@ -1314,12 +1314,93 @@ CRITICAL RULES FOR ALL LISTS:
                 data = data["company"]
             if not isinstance(data, dict) or "ticker" not in data:
                 raise ValueError(f"Invalid company profile structure")
+            # Post-generation validation: fix any generic entries
+            data = await _fix_generic_ecosystem_entries(data, client)
             return data
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             last_error = e
             print(f"[COMPANY] Attempt {attempt+1} failed: {e}")
             continue
     raise last_error
+
+
+async def _fix_generic_ecosystem_entries(profile: dict, client) -> dict:
+    """Scan ecosystem lists for generic category names and replace them with specific companies."""
+    generic_indicators = [
+        'companies', 'firms', 'services', 'providers', 'agencies', 'organizations',
+        'institutions', 'networks', 'operators', 'manufacturers', 'distributors',
+        'retailers', 'suppliers', 'vendors', 'contractors', 'consultants',
+        'banks', 'funds', 'insurers', 'carriers', 'utilities', 'producers',
+        'refiners', 'processors', 'dealers', 'brokers', 'lenders', 'startups',
+        'players', 'cooperatives', 'chains', 'stores', 'shops', 'outlets',
+        'wholesalers', 'importers', 'exporters', 'growers', 'mills'
+    ]
+
+    def is_generic(name: str) -> bool:
+        words = name.lower().split()
+        if any(w in generic_indicators for w in words):
+            return True
+        # Also catch patterns like "Independent Retailers" or "Online Mattress Brands"
+        if len(words) >= 2 and (words[-1].endswith('ers') or words[-1].endswith('ors') or words[-1].endswith('ies')):
+            return True
+        return False
+
+    company_name = profile.get('name', profile.get('ticker', ''))
+    lists_to_check = ['competitors', 'suppliers', 'customers', 'distributors']
+    generics_found = {}
+
+    for field in lists_to_check:
+        items = profile.get(field, [])
+        generic_items = [item for item in items if is_generic(item)]
+        if generic_items:
+            generics_found[field] = generic_items
+
+    if not generics_found:
+        return profile  # All entries are specific — no fixes needed
+
+    # Build a single LLM call to resolve all generic entries at once
+    fix_parts = []
+    for field, items in generics_found.items():
+        fix_parts.append(f"{field}: {', '.join(items)}")
+    generic_list = "\n".join(fix_parts)
+
+    print(f"[COMPANY-FIX] Found generic entries in {company_name} profile: {generic_list}")
+
+    fix_prompt = f"""The following ecosystem entries for {company_name} are generic categories instead of specific company names.
+Replace EACH generic category with 2-3 specific, real companies that fit that category for {company_name}'s industry.
+
+Generic entries to fix:
+{generic_list}
+
+Rules:
+- Return specific, real company or organization names only.
+- Be accurate to {company_name}'s actual industry and business relationships.
+- For example, if {company_name} is a mattress company and "Mattress Retailers" is listed, replace with specific retailers like "Mattress Firm", "Sleep Country Canada", "Ashley HomeStore".
+- If {company_name} is an apparel company and "Wholesale Distributors" is listed, replace with "AlphaBroder", "SanMar", "S&S Activewear".
+
+Return JSON object with the same field names, each containing an array of specific company names:
+Example: {{"distributors": ["AlphaBroder", "SanMar", "S&S Activewear"], "customers": ["Walmart", "Target", "Amazon"]}}
+
+JSON only, no markdown:"""
+
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=1000,
+            messages=[{"role": "user", "content": fix_prompt}]
+        )
+        fixes = _extract_json(msg.content[0].text.strip())
+        if isinstance(fixes, dict):
+            for field, new_items in fixes.items():
+                if field in profile and isinstance(new_items, list):
+                    # Replace generic items with specific ones, keep non-generic items
+                    original = profile[field]
+                    kept = [item for item in original if not is_generic(item)]
+                    profile[field] = kept + [item for item in new_items if isinstance(item, str)]
+                    print(f"[COMPANY-FIX] {field}: replaced generics with {new_items}")
+    except Exception as e:
+        print(f"[COMPANY-FIX] Failed to fix generic entries: {e}")
+
+    return profile
 
 
 # ============================================================
@@ -1508,10 +1589,10 @@ async def serve_app_js():
 
 
 @app.get("/api/company/{ticker}")
-async def get_company(ticker: str):
+async def get_company(ticker: str, refresh: bool = False):
     """Return company profile, generating on demand."""
     ticker = ticker.upper().replace("-", ".")
-    if ticker in company_cache:
+    if not refresh and ticker in company_cache:
         return company_cache[ticker]
 
     name_hint = WELL_KNOWN_COMPANIES.get(ticker)
@@ -1686,15 +1767,38 @@ async def get_prefetch_status(ticker: str):
 
 
 @app.post("/api/company-full/{ticker}")
-async def get_company_full(ticker: str):
+async def get_company_full(ticker: str, request: Request):
     """Two-phase endpoint: returns company + execs fast, experts load in background.
     Frontend polls /api/experts-status/{ticker} to get experts when ready."""
     ticker = ticker.upper().replace("-", ".")
 
+    # Check if refresh requested (body may be empty for POST)
+    refresh = False
+    try:
+        body = await request.json()
+        refresh = body.get("refresh", False)
+    except Exception:
+        pass
+
+    if refresh:
+        print(f"[REFRESH] Force-regenerating {ticker} — clearing all caches")
+        # Clear all caches for this ticker
+        for cache in [company_cache, experts_cache, executives_cache, questions_cache, entity_experts_cache, exec_experts_cache]:
+            keys_to_remove = [k for k in cache if k == ticker or k.startswith(f"{ticker}:")]
+            for k in keys_to_remove:
+                del cache[k]
+        # Also clear disk cache for this ticker
+        for prefix in ["company", "experts", "execs", "questions", "ent_exp", "exec_exp"]:
+            p = _cache_path(prefix, ticker)
+            if p.exists():
+                p.unlink()
+        # Clear prefetch status
+        prefetch_status.pop(ticker, None)
+
     # Step 1: Check caches first
-    cached_company = mem_or_disk(company_cache, "company", ticker)
-    cached_execs = mem_or_disk(executives_cache, "execs", ticker)
-    cached_experts = mem_or_disk(experts_cache, "experts", ticker)
+    cached_company = None if refresh else mem_or_disk(company_cache, "company", ticker)
+    cached_execs = None if refresh else mem_or_disk(executives_cache, "execs", ticker)
+    cached_experts = None if refresh else mem_or_disk(experts_cache, "experts", ticker)
 
     company = cached_company
     exec_list = cached_execs

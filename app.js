@@ -477,7 +477,61 @@ function useCompanyData(ticker) {
     }
   }, [ticker]);
 
-  return { company, experts, loading, expertsLoading, error, refreshExperts };
+  const refreshCompany = useCallback(() => {
+    if (!ticker) return;
+    // Clear session caches
+    delete sessionCache.companyProfiles[ticker];
+    delete sessionCache.experts[ticker];
+    delete sessionCache.executives[ticker];
+    setCompany(null);
+    setExperts([]);
+    setLoading(true);
+    setError(null);
+    setExpertsLoading(false);
+    // Call API with refresh flag
+    apiFetch(`/api/company-full/${encodeURIComponent(ticker)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh: true })
+    })
+      .then(data => {
+        sessionCache.companyProfiles[ticker] = data.company;
+        sessionCache.executives[ticker] = data.executives;
+        setCompany(data.company);
+        if (data.experts_loading) {
+          setExperts([]);
+          setLoading(false);
+          setExpertsLoading(true);
+          let pollAttempts = 0;
+          const pollInterval = setInterval(async () => {
+            pollAttempts++;
+            try {
+              const status = await apiFetch(`/api/experts-status/${encodeURIComponent(ticker)}`);
+              if (status.ready) {
+                clearInterval(pollInterval);
+                sessionCache.experts[ticker] = status.experts || [];
+                setExperts(status.experts || []);
+                setExpertsLoading(false);
+              } else if (pollAttempts >= 90) {
+                clearInterval(pollInterval);
+                setExperts([]);
+                setExpertsLoading(false);
+              }
+            } catch (e) {}
+          }, 2000);
+        } else {
+          sessionCache.experts[ticker] = data.experts;
+          setExperts(data.experts);
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [ticker]);
+
+  return { company, experts, loading, expertsLoading, error, refreshExperts, refreshCompany };
 }
 
 // ============================================================
@@ -1024,7 +1078,7 @@ function ExecutivesSection({ ticker, companyName }) {
 // SCREEN 1: COMPANY RESEARCH
 // ============================================================
 function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
-  const { company, experts: companyExperts, loading, expertsLoading, error, refreshExperts } = useCompanyData(ticker);
+  const { company, experts: companyExperts, loading, expertsLoading, error, refreshExperts, refreshCompany } = useCompanyData(ticker);
   const prefetchSt = usePrefetchStatus(ticker);
   const [addedEntities, setAddedEntities] = useState({});  // { sectionKey: [name, ...] }
   const [editedEntities, setEditedEntities] = useState({}); // { sectionKey: { oldName: newName, ... } }
@@ -1120,8 +1174,23 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
         ),
         React.createElement('h1', { className: 'text-xl font-semibold text-white' }, company.name)
       ),
-      React.createElement('div', { className: 'w-72' },
-        React.createElement(CompanySearch, { value: ticker, onChange: setTicker, placeholder: 'Switch company...' })
+      React.createElement('div', { className: 'flex items-center gap-3' },
+        React.createElement('button', {
+          onClick: refreshCompany,
+          className: 'flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-teal-400 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 transition-colors',
+          title: 'Regenerate company profile and experts from scratch'
+        },
+          React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            React.createElement('path', { d: 'M21.5 2v6h-6' }),
+            React.createElement('path', { d: 'M2.5 22v-6h6' }),
+            React.createElement('path', { d: 'M2 11.5a10 10 0 0 1 18.8-4.3' }),
+            React.createElement('path', { d: 'M22 12.5a10 10 0 0 1-18.8 4.2' })
+          ),
+          'Refresh'
+        ),
+        React.createElement('div', { className: 'w-72' },
+          React.createElement(CompanySearch, { value: ticker, onChange: setTicker, placeholder: 'Switch company...' })
+        )
       )
     ),
 
