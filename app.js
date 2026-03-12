@@ -1207,14 +1207,46 @@ function FormerEmployeesSection({ ticker, companyName }) {
 // SCREEN 1: COMPANY RESEARCH
 // ============================================================
 function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
-  const { company, experts: companyExperts, loading, expertsLoading, error, refreshExperts, refreshCompany } = useCompanyData(ticker);
+  const { company, loading, error, refreshCompany } = useCompanyData(ticker);
   const prefetchSt = usePrefetchStatus(ticker);
   const [addedEntities, setAddedEntities] = useState({});  // { sectionKey: [name, ...] }
   const [editedEntities, setEditedEntities] = useState({}); // { sectionKey: { oldName: newName, ... } }
   const [deletedEntities, setDeletedEntities] = useState({}); // { sectionKey: [name, ...] }
 
+  // Former Employees state
+  const [formerEmployees, setFormerEmployees] = useState([]);
+  const [formerLoading, setFormerLoading] = useState(false);
+  const [formerRefreshKey, setFormerRefreshKey] = useState(0);
+
   // Reset all entity overrides when company changes
   useEffect(() => { setAddedEntities({}); setEditedEntities({}); setDeletedEntities({}); }, [ticker]);
+
+  // Fetch former employees when company loads (or on refresh)
+  useEffect(() => {
+    if (!ticker) return;
+    if (formerRefreshKey === 0 && sessionCache._formerEmployees && sessionCache._formerEmployees[ticker]) {
+      setFormerEmployees(sessionCache._formerEmployees[ticker]);
+      return;
+    }
+    setFormerLoading(true);
+    setFormerEmployees([]);
+    apiFetch(`/api/former-employees/${encodeURIComponent(ticker)}`)
+      .then(data => {
+        setFormerEmployees(data || []);
+        if (!sessionCache._formerEmployees) sessionCache._formerEmployees = {};
+        sessionCache._formerEmployees[ticker] = data || [];
+        // Register in experts cache so bio/questions work
+        if (Array.isArray(data) && data.length > 0) {
+          const existing = sessionCache.experts[ticker] || [];
+          for (const e of data) {
+            if (!existing.some(ex => ex.id === e.id)) existing.push(e);
+          }
+          sessionCache.experts[ticker] = existing;
+        }
+        setFormerLoading(false);
+      })
+      .catch(() => { setFormerLoading(false); });
+  }, [ticker, formerRefreshKey]);
 
   const handleAddEntity = (sectionKey, name) => {
     setAddedEntities(prev => ({
@@ -1252,9 +1284,7 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
     }
   }, [company, onCompanyLoaded]);
 
-  const sortedExperts = useMemo(() => {
-    return [...companyExperts].sort((a, b) => calculateOverallScore(b.score) - calculateOverallScore(a.score));
-  }, [companyExperts]);
+
 
   if (!ticker) {
     return React.createElement('div', { className: 'flex flex-col items-center justify-center h-full px-8' },
@@ -1305,7 +1335,7 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
       ),
       React.createElement('div', { className: 'flex items-center gap-3' },
         React.createElement('button', {
-          onClick: refreshCompany,
+          onClick: () => { refreshCompany(); setFormerRefreshKey(k => k + 1); },
           className: 'flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-teal-400 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 transition-colors',
           title: 'Regenerate company profile and experts from scratch'
         },
@@ -1334,9 +1364,6 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
 
     // Executives Section
     React.createElement(ExecutivesSection, { ticker: company.ticker, companyName: company.name }),
-
-    // Former Employees Section
-    React.createElement(FormerEmployeesSection, { ticker: company.ticker, companyName: company.name }),
 
     // Ecosystem Grid — editable items with add/edit/delete
     React.createElement('div', { className: 'grid grid-cols-2 xl:grid-cols-3 gap-4' },
@@ -1376,42 +1403,49 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
     // Disclaimer
     React.createElement(Disclaimer),
 
-    // Top Experts Table
+    // Former Employees Table
     React.createElement('div', { className: 'bg-white/[0.03] rounded-xl border border-white/5 overflow-hidden' },
       React.createElement('div', { className: 'px-5 py-4 border-b border-white/5 flex items-center justify-between' },
         React.createElement('h3', { className: 'text-xs font-medium text-gray-400 uppercase tracking-wider' },
-          expertsLoading ? 'Expert Network — Generating experts...' : `Expert Network — ${companyExperts.length} Experts`
-        ),
-        !expertsLoading && ticker && React.createElement(FindMoreExpertsButton, { ticker, onComplete: refreshExperts })
+          formerLoading ? 'Former Employees — Searching...' : `Former Employees — ${formerEmployees.length} Results`
+        )
       ),
-      expertsLoading
+      formerLoading
         ? React.createElement('div', { className: 'flex flex-col items-center justify-center py-12' },
-            React.createElement('div', { className: 'animate-spin h-6 w-6 border-2 border-teal-400/30 border-t-teal-400 rounded-full mb-3' }),
-            React.createElement('p', { className: 'text-xs text-gray-400' }, 'Discovering and verifying experts in the background...'),
-            React.createElement('p', { className: 'text-[10px] text-gray-600 mt-1' }, 'Company profile and ecosystem loaded. Experts will appear shortly.')
+            React.createElement('div', { className: 'animate-spin h-6 w-6 border-2 border-amber-400/30 border-t-amber-400 rounded-full mb-3' }),
+            React.createElement('p', { className: 'text-xs text-gray-400' }, 'Finding former C-Suite, SVP, VP & MD employees...'),
+            React.createElement('p', { className: 'text-[10px] text-gray-600 mt-1' }, 'Searching public records and verifying identities.')
           )
-        : companyExperts.length === 0
+        : formerEmployees.length === 0
           ? React.createElement('div', { className: 'flex flex-col items-center justify-center py-12' },
-              React.createElement('p', { className: 'text-sm text-gray-400' }, 'No experts found for this company.'),
-              React.createElement('p', { className: 'text-xs text-gray-500 mt-1' }, 'Try clicking "Find More Experts" or reload the company.')
+              React.createElement('p', { className: 'text-sm text-gray-400' }, 'No former employees found for this company.'),
+              React.createElement('p', { className: 'text-xs text-gray-500 mt-1' }, 'Try refreshing the company to search again.')
             )
           : React.createElement('div', { className: 'overflow-x-auto' },
         React.createElement('table', { className: 'w-full text-left' },
           React.createElement('thead', null,
             React.createElement('tr', { className: 'border-b border-white/5' },
-              ['Name', 'Company', 'Current Role', 'Former Role', 'Type', 'Expertise', 'Exp.', 'Connection', 'Score', 'Actions'].map(h =>
+              ['Name', 'Current Company', 'Current Role', 'Former Role', 'Level', 'Tenure', 'Expertise', 'Connection', 'Actions'].map(h =>
                 React.createElement('th', { key: h, className: 'px-4 py-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap' }, h)
               )
             )
           ),
           React.createElement('tbody', null,
-            sortedExperts.slice(0, 15).map(e =>
+            formerEmployees.map(e =>
               React.createElement('tr', { key: e.id, className: 'border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors' },
                 React.createElement('td', { className: 'px-4 py-2.5 text-xs font-medium whitespace-nowrap' }, React.createElement(ExpertName, { expert: e, className: 'text-white text-xs font-medium' })),
                 React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-teal-400/80 max-w-[160px] truncate' }, e.companyAffiliation || ''),
                 React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-300 max-w-[200px] truncate' }, e.currentRole || ''),
-                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-400 max-w-[160px] truncate' }, e.formerRole),
-                React.createElement('td', { className: 'px-4 py-2.5 text-[10px] text-gray-500' }, nodeTypeLabels[e.ecosystemNode] || e.ecosystemNode),
+                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-400 max-w-[180px] truncate' }, e.formerRole || ''),
+                React.createElement('td', { className: 'px-4 py-2.5' },
+                  React.createElement('span', { className: cn('text-[10px] px-2 py-0.5 rounded-full font-medium',
+                    e.level === 'C-Suite' ? 'bg-amber-500/10 text-amber-400' :
+                    e.level === 'SVP' ? 'bg-orange-500/10 text-orange-400' :
+                    e.level === 'VP' ? 'bg-teal-500/10 text-teal-400' :
+                    'bg-blue-500/10 text-blue-400'
+                  ) }, e.level || 'VP')
+                ),
+                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-400 whitespace-nowrap' }, e.yearsAtCompany || ''),
                 React.createElement('td', { className: 'px-4 py-2.5' },
                   React.createElement('div', { className: 'flex gap-1 flex-wrap' },
                     (e.expertise || []).slice(0, 2).map((ex, j) =>
@@ -1419,11 +1453,9 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
                     )
                   )
                 ),
-                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-400 font-mono tabular-nums' }, `${e.yearsExperience}y`),
                 React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-400 max-w-[200px]' },
                   React.createElement('span', { className: 'line-clamp-2' }, e.connectionToCompany)
                 ),
-                React.createElement('td', { className: 'px-4 py-2.5' }, React.createElement(ScoreBadge, { score: e.score })),
                 React.createElement('td', { className: 'px-4 py-2.5' },
                   React.createElement('div', { className: 'flex items-center gap-1' },
                     React.createElement(EmailExpertButton, { expert: e, companyName: company.name }),
