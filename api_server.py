@@ -1392,10 +1392,15 @@ JSON only, no markdown:"""
         if isinstance(fixes, dict):
             for field, new_items in fixes.items():
                 if field in profile and isinstance(new_items, list):
-                    # Replace generic items with specific ones, keep non-generic items
+                    # Replace generic items with specific ones, keep non-generic items, deduplicate
                     original = profile[field]
                     kept = [item for item in original if not is_generic(item)]
-                    profile[field] = kept + [item for item in new_items if isinstance(item, str)]
+                    seen = {item.lower().strip() for item in kept}
+                    for item in new_items:
+                        if isinstance(item, str) and item.lower().strip() not in seen:
+                            kept.append(item)
+                            seen.add(item.lower().strip())
+                    profile[field] = kept
                     print(f"[COMPANY-FIX] {field}: replaced generics with {new_items}")
     except Exception as e:
         print(f"[COMPANY-FIX] Failed to fix generic entries: {e}")
