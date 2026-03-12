@@ -1198,7 +1198,7 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
         React.createElement('table', { className: 'w-full text-left' },
           React.createElement('thead', null,
             React.createElement('tr', { className: 'border-b border-white/5' },
-              ['Name', 'Current Role', 'Former Role', 'Type', 'Expertise', 'Exp.', 'Connection', 'Score', 'Actions'].map(h =>
+              ['Name', 'Company', 'Current Role', 'Former Role', 'Type', 'Expertise', 'Exp.', 'Connection', 'Score', 'Actions'].map(h =>
                 React.createElement('th', { key: h, className: 'px-4 py-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap' }, h)
               )
             )
@@ -1207,7 +1207,8 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
             sortedExperts.slice(0, 15).map(e =>
               React.createElement('tr', { key: e.id, className: 'border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors' },
                 React.createElement('td', { className: 'px-4 py-2.5 text-xs font-medium whitespace-nowrap' }, React.createElement(ExpertName, { expert: e, className: 'text-white text-xs font-medium' })),
-                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-300 max-w-[200px] truncate' }, formatCurrentRole(e)),
+                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-teal-400/80 max-w-[160px] truncate' }, e.companyAffiliation || ''),
+                React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-300 max-w-[200px] truncate' }, e.currentRole || ''),
                 React.createElement('td', { className: 'px-4 py-2.5 text-[11px] text-gray-400 max-w-[160px] truncate' }, e.formerRole),
                 React.createElement('td', { className: 'px-4 py-2.5 text-[10px] text-gray-500' }, nodeTypeLabels[e.ecosystemNode] || e.ecosystemNode),
                 React.createElement('td', { className: 'px-4 py-2.5' },
