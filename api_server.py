@@ -2081,9 +2081,11 @@ async def generate_executives(ticker: str, company_name: str) -> list:
     client = AsyncAnthropic()
 
     # Web search for current executive leadership using DuckDuckGo
+    # Use multiple targeted queries to maximize coverage
     search_queries = [
-        f'"{company_name}" executive leadership team CEO CFO COO',
-        f'"{company_name}" "{ticker}" officers SEC proxy',
+        f'{company_name} management team leadership executives',
+        f'{company_name} CEO CFO COO President executive officers 2025 2026',
+        f'{company_name} {ticker} proxy statement executive officers annual report',
     ]
     search_tasks = [ddg_search(q) for q in search_queries]
     search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
@@ -2099,17 +2101,19 @@ async def generate_executives(ticker: str, company_name: str) -> list:
 
     prompt = f"""List the top 10 current executives (C-Suite and SVP/EVP level) of {company_name} ({ticker}).
 
-=== WEB RESEARCH (use this as primary source) ===
+=== WEB RESEARCH (use this as PRIMARY source — prioritize names found here) ===
 {search_context or "(No web context — use SEC filings and press releases.)"}
 === END ===
 
 For each executive, provide their name, EXACT current title, a brief description of their role, and department.
 
 CRITICAL ACCURACY RULES:
-- Names and titles MUST match what is in the company's most recent SEC proxy filing or official leadership page.
-- If the web research above lists specific names and titles, use those EXACTLY.
-- Do NOT guess or fabricate titles. Only include executives you are confident about.
-- If unsure about someone, omit them rather than risk inaccuracy.
+- ONLY include executives whose names appear in the web research above, in SEC proxy filings, or on the company's official leadership page.
+- Names and titles MUST match what is publicly documented. If the web research names specific people, use those names and titles EXACTLY.
+- Do NOT guess, infer, or fabricate any executive names. Every name must be a real person who currently holds that position.
+- If you can only confidently identify 5-6 executives from the sources, return 5-6 — do NOT pad the list with guesses.
+- Aim for at least 7-8 executives — most public companies have this many C-Suite/SVP/EVP officers.
+- NEVER return a name you are not confident about. An accurate list of 6 is better than a list of 10 with fabricated names.
 
 Return ONLY a valid JSON array of objects (no markdown, no commentary):
 [{{"name": "Full Name", "title": "Exact Current Title", "description": "1 sentence about their role", "department": "e.g. Executive, Finance, Technology"}}]"""
