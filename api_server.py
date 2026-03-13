@@ -1021,50 +1021,38 @@ async def web_search_experts(company_name: str, ticker: str, ecosystem: dict,
 
 
 async def verify_and_correct_experts(experts: list, company_name: str, ticker: str) -> list:
-    """Batch verification: single Gemini Flash call to verify all experts at once,
-    then Claude Sonnet reconciles. Much faster than individual calls."""
+    """Verify experts using web search + LLM cross-check.
+    Step 1: Web search each expert to get real evidence.
+    Step 2: LLM reviews evidence and corrects/removes bad entries."""
     if not experts:
         return experts
 
     from anthropic import AsyncAnthropic
     client = AsyncAnthropic()
 
-    # Step 1: BATCH verify all experts in ONE Gemini Flash call (instead of 10 individual calls)
-    expert_list_text = "\n".join(
-        f"{i+1}. {e.get('name','')} | Role: {e.get('currentRole','')} | Company: {e.get('companyAffiliation','')}"
-        for i, e in enumerate(experts)
-    )
-    gemini_evidence = {}
-    try:
-        msg = await client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=3000,
-            messages=[{"role": "user", "content":
-                f"Verify each person below. For EACH, on one line, state:\n"
-                f"- Their number\n"
-                f"- CONFIRMED if correct, WRONG COMPANY if they work elsewhere (state where), or UNKNOWN if you can't verify them\n"
-                f"- Their actual company and title if different\n\n"
-                f"{expert_list_text}\n\n"
-                f"Format: '1. CONFIRMED' or '2. WRONG COMPANY: actually at XYZ Corp as VP Sales' or '3. UNKNOWN'\n"
-                f"One line per person. Be specific about company names."}]
-        )
-        batch_result = msg.content[0].text.strip()
-        print(f"[VERIFY-BATCH] Gemini batch result ({len(batch_result)} chars)")
-        # Parse batch results — match each line to an expert
-        for line in batch_result.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            # Try to match expert by number or name
-            for i, e in enumerate(experts):
-                name = e.get('name', '')
-                if line.startswith(f"{i+1}.") or line.startswith(f"{i+1})") or name.lower() in line.lower():
-                    gemini_evidence[name] = line
-                    print(f"[VERIFY-BATCH] {name}: {line[:120]}")
-                    break
-    except Exception as e:
-        print(f"[VERIFY-BATCH] Gemini batch failed: {e}")
+    # Step 1: Web search each expert in parallel for real verification evidence
+    async def _search_expert(e):
+        name = e.get('name', '')
+        company = e.get('companyAffiliation', '')
+        # Search just the name (avoid middle initials issues)
+        first_last = ' '.join([name.split()[0], name.split()[-1]]) if len(name.split()) >= 2 else name
+        query = f'"{first_last}" {company}'
+        try:
+            result = await ddg_search(query)
+            return (name, result or '')
+        except Exception:
+            return (name, '')
 
-    # Step 2: Build evidence report and let Claude Sonnet make final decisions
+    search_tasks = [_search_expert(e) for e in experts]
+    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+    web_evidence = {}
+    for r in search_results:
+        if isinstance(r, tuple):
+            web_evidence[r[0]] = r[1][:1500]  # Cap per expert to control prompt size
+            if r[1]:
+                print(f"[VERIFY-WEB] {r[0]}: {len(r[1])} chars of web evidence")
+
+    # Step 2: Build evidence report with web search results
     expert_json = json.dumps(experts, indent=2)
 
     evidence_parts = []
@@ -1072,27 +1060,27 @@ async def verify_and_correct_experts(experts: list, company_name: str, ticker: s
         name = e.get('name', '')
         parts = [f"Expert {i+1}: {name}"]
         parts.append(f"  Claimed: {e.get('currentRole','')} at {e.get('companyAffiliation','')}")
-        if name in gemini_evidence:
-            parts.append(f"  Gemini verification: {gemini_evidence[name]}")
+        if name in web_evidence and web_evidence[name].strip():
+            parts.append(f"  Web search results: {web_evidence[name][:800]}")
         else:
-            parts.append(f"  Gemini verification: (no result — treat as unverified)")
+            parts.append(f"  Web search results: (no results found — this person may not exist or may not be at claimed company)")
         evidence_parts.append("\n".join(parts))
 
     evidence_text = "\n\n".join(evidence_parts)
-    print(f"[VERIFY] Built evidence report ({len(evidence_text)} chars)")
+    print(f"[VERIFY] Built evidence report ({len(evidence_text)} chars) with web search for {len(experts)} experts")
 
-    correction_prompt = f"""You are reviewing an expert list for accuracy. For each expert, I have verification from Gemini (an independent AI) and optional web search results.
+    correction_prompt = f"""You are reviewing an expert list for accuracy. For each expert, I have web search evidence.
 
 RULES (in priority order):
-1. WRONG COMPANY is the #1 disqualifier. If Gemini says "WRONG COMPANY" or indicates the person works at a different company than listed, you MUST either:
+1. WRONG COMPANY is the #1 disqualifier. If web search shows the person works at a DIFFERENT company than listed, you MUST either:
    a. CORRECT the companyAffiliation, currentRole, ecosystemNode, and connectionToCompany to reflect their ACTUAL company, OR
    b. REMOVE them (set remove=true) if the corrected company is irrelevant to the research context.
-2. If Gemini says someone is CEO, CFO, COO, or CTO of a publicly traded company, REMOVE them (set remove=true).
-3. If Gemini says "UNKNOWN PERSON" with no web evidence, REMOVE them (set remove=true) — we need verifiable experts.
-4. If Gemini confirms the person at the correct company, keep them as-is.
-5. If web evidence and Gemini disagree, prefer the more specific/recent information.
-6. companyAffiliation MUST match where they ACTUALLY work. This is critical — an expert listed under the wrong company destroys user trust.
-7. If a person's actual company is different but still relevant (e.g., competitor, supplier, customer of the target), CORRECT the entry. If irrelevant, REMOVE.
+2. If web search shows someone is CEO, CFO, COO, or CTO of a publicly traded company, REMOVE them (set remove=true).
+3. If NO web evidence exists for a person (no search results at all), REMOVE them (set remove=true) — they are likely fabricated.
+4. If web search confirms the person at the correct company with the correct role, keep them.
+5. companyAffiliation MUST match where they ACTUALLY work according to web evidence. This is critical — an expert listed under the wrong company destroys user trust.
+6. If a person's actual company is different but still relevant (e.g., competitor, supplier, customer of the target), CORRECT the entry. If irrelevant, REMOVE.
+7. currentRole must match what web evidence shows. If the web shows a different title, update it.
 
 === EXPERT LIST ===
 {expert_json}
@@ -1114,8 +1102,8 @@ Return ONLY valid JSON array."""
 
     try:
         msg = await client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=8192,
-            system="You output ONLY valid JSON arrays. No preamble, no commentary, no markdown. Start with [ end with ].",
+            model="claude-sonnet-4-6", max_tokens=8192,
+            system="You output ONLY valid JSON arrays. No preamble, no commentary, no markdown. Start with [ end with ]. Your job is to verify experts against web search evidence. Be strict — remove anyone not confirmed by web evidence.",
             messages=[{"role": "user", "content": correction_prompt}]
         )
         raw = msg.content[0].text
