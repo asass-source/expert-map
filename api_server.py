@@ -2421,7 +2421,11 @@ async def resolve_generic_entity(entity_name: str, entity_type: str, parent_comp
         'platforms', 'solutions', 'systems', 'technologies', 'specialists',
         'integrators', 'aggregators', 'marketplaces', 'warehouses', 'stores',
         'shops', 'chains', 'outlets', 'clinics', 'hospitals', 'labs',
-        'e-commerce', 'online', 'digital', 'wholesale', 'logistics'
+        'e-commerce', 'online', 'digital', 'wholesale', 'logistics',
+        'practices', 'offices', 'centers', 'centres', 'facilities', 'depots',
+        'studios', 'fleets', 'mills', 'mines',
+        'resorts', 'pharmacies', 'dealerships',
+        'schools', 'academies'
     ]
     name_lower = entity_name.lower().strip()
     name_words = name_lower.split()
@@ -2448,8 +2452,38 @@ async def resolve_generic_entity(entity_name: str, entity_type: str, parent_comp
             has_suffix = any(name_lower.endswith(f' {s}') or name_lower.endswith(f' {s}.') for s in company_suffixes)
             if not has_suffix:
                 # Last resort: check if the name ends in a plural noun (likely a category)
-                if name_lower.endswith('ers') or name_lower.endswith('ors') or name_lower.endswith('ies'):
+                if name_lower.endswith('ers') or name_lower.endswith('ors') or name_lower.endswith('ies') or name_lower.endswith('ices') or name_lower.endswith('als') or name_lower.endswith('ets') or name_lower.endswith('ings'):
                     is_generic = True
+                # Also check: short names (2-3 words) with no proper-noun-like qualities
+                elif len(name_words) <= 3:
+                    # If all words are common English words (no unique brand-like tokens), likely generic
+                    common_modifiers = ['large', 'small', 'big', 'major', 'top', 'leading', 'key', 'primary',
+                                        'general', 'corporate', 'private', 'public', 'direct', 'indirect',
+                                        'north', 'south', 'east', 'west', 'us', 'american', 'european', 'asian']
+                    if any(w in common_modifiers for w in name_words):
+                        is_generic = True
+
+    # Final check: if ALL words are common descriptive/industry words (no brand-like tokens),
+    # it's almost certainly a category, not a company. E.g. "Dental Practices", "Hospital Networks"
+    # But "Aspen Dental" has a brand word ("Aspen") so it passes.
+    if not is_generic:
+        industry_words = set(generic_indicators) | {
+            'dental', 'medical', 'healthcare', 'veterinary', 'optical',
+            'automotive', 'industrial', 'commercial', 'residential',
+            'government', 'municipal', 'federal', 'military',
+            'financial', 'legal', 'educational', 'agricultural',
+            'pharmaceutical', 'chemical', 'environmental', 'energy',
+            'construction', 'transportation', 'telecommunications',
+            'technology', 'software', 'hardware', 'electronics',
+            'food', 'beverage', 'apparel', 'textile', 'cosmetic',
+            'real', 'estate', 'insurance', 'banking', 'investment',
+            'hotels', 'restaurants', 'universities', 'colleges',
+            'plants', 'agencies', 'hospitals'
+        }
+        all_words_generic = all(w in industry_words for w in name_words)
+        if all_words_generic and len(name_words) >= 2:
+            is_generic = True
+            print(f"[GENERIC-ENTITY] All words are industry terms: '{entity_name}'")
 
     if not is_generic:
         return []  # Not generic — treat as a specific company name
