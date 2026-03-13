@@ -1251,6 +1251,19 @@ function CompanyResearch({ onCompanyLoaded, ticker, setTicker }) {
   }, [ticker, formerRefreshKey]);
 
   const handleAddEntity = (sectionKey, name) => {
+    // Prevent duplicates: check original company items + already-added items
+    const sectionMap = company ? {
+      endMarket: company.endMarkets, competitor: company.competitors,
+      supplier: company.suppliers, customer: company.customers,
+      distributor: company.distributors, regulator: company.regulators
+    } : {};
+    const origItems = (sectionMap[sectionKey] || []).map(i => i.toLowerCase());
+    const addedItems = (addedEntities[sectionKey] || []).map(i => i.toLowerCase());
+    const edits = editedEntities[sectionKey] || {};
+    const allExisting = [...origItems, ...addedItems, ...Object.values(edits).map(v => v.toLowerCase())];
+    if (allExisting.includes(name.toLowerCase())) {
+      return; // Already exists
+    }
     setAddedEntities(prev => ({
       ...prev,
       [sectionKey]: [...(prev[sectionKey] || []), name]
