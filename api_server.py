@@ -2219,7 +2219,11 @@ Source people from LinkedIn profiles, SEC filings, press releases, and conferenc
                 e.setdefault("linkedinUrl", "")
                 e.setdefault("sourceNote", "")
                 e.setdefault("currentRole", "")
-            return sanitize_experts(experts[:5])
+            sanitized = sanitize_experts(experts[:5])
+            # VERIFICATION PASS: web search + Sonnet cross-check
+            print(f"[EXEC-EXPERTS] Verifying {len(sanitized)} experts for {exec_name}...")
+            verified = await verify_and_correct_experts(sanitized, company_name, ticker)
+            return verified
         except (json.JSONDecodeError, ValueError) as e:
             print(f"[EXEC-EXPERTS] Attempt {attempt+1} ({model}) failed: {e}")
     return []
@@ -2341,7 +2345,11 @@ Source people from LinkedIn profiles, SEC filings, press releases, and conferenc
                 }
                 next_expert_id += 1
                 experts.append(expert)
-            return sanitize_experts(experts)
+            sanitized = sanitize_experts(experts)
+            # VERIFICATION PASS: web search + Sonnet cross-check
+            print(f"[FORMER-EMP] Verifying {len(sanitized)} former employees for {ticker}...")
+            verified = await verify_and_correct_experts(sanitized, company_name, ticker)
+            return verified
         except (json.JSONDecodeError, ValueError) as e:
             print(f"[FORMER-EMP] Attempt {attempt+1} ({model}) failed: {e}")
     return []
@@ -2620,7 +2628,12 @@ Source people from LinkedIn profiles, SEC filings, press releases, and conferenc
                     next_expert_id += 1
                     e.setdefault("linkedinUrl", "")
                     e.setdefault("sourceNote", "")
-                return sanitize_experts(experts[:5])
+                    e.setdefault("companyAffiliation", entity_name)
+                sanitized = sanitize_experts(experts[:5])
+                # VERIFICATION PASS: web search + Sonnet cross-check
+                print(f"[ENTITY-EXPERTS] Verifying {len(sanitized)} experts for {entity_name}...")
+                verified = await verify_and_correct_experts(sanitized, entity_name, parent_ticker)
+                return verified
             # Empty list from this model — try next model
             print(f"[ENTITY-EXPERTS] Attempt {attempt+1} ({model}): empty result, trying next model")
         except (json.JSONDecodeError, ValueError) as e:
@@ -2685,7 +2698,10 @@ No markdown."""
                 next_expert_id += 1
                 e.setdefault("linkedinUrl", "")
                 e.setdefault("sourceNote", "")
-            return experts
+            # VERIFICATION PASS: web search + Sonnet cross-check
+            print(f"[DIR-EXPERTS] Verifying {len(experts)} directory experts for {ticker}...")
+            verified = await verify_and_correct_experts(experts, company_name, ticker)
+            return verified
         except (json.JSONDecodeError, ValueError) as e:
             print(f"[DIR-EXPERTS] Attempt {attempt+1} ({model}) failed: {e}")
     return []
@@ -2719,8 +2735,6 @@ async def get_former_employees_endpoint(ticker: str):
     company_name = company_cache.get(ticker, {}).get("name") or WELL_KNOWN_COMPANIES.get(ticker, ticker)
     try:
         employees = await generate_former_employees(ticker, company_name)
-        # Verify against web search
-        employees = await verify_and_correct_experts(employees, company_name, ticker)
         save_both(former_employees_cache, "former_emp", ticker, employees)
         # Also register in experts_cache so bio/questions/publications work
         all_experts = experts_cache.get(ticker, [])
