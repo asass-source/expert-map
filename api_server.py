@@ -2417,7 +2417,11 @@ async def resolve_generic_entity(entity_name: str, entity_type: str, parent_comp
         'third-party', 'specialty', 'boutique', 'mid-size', 'small-cap', 'large-cap',
         'producers', 'refiners', 'processors', 'dealers', 'brokers', 'lenders',
         'startups', 'players', 'entrants', 'incumbents', 'conglomerates',
-        'cooperatives', 'unions', 'councils', 'boards', 'exchanges'
+        'cooperatives', 'unions', 'councils', 'boards', 'exchanges',
+        'platforms', 'solutions', 'systems', 'technologies', 'specialists',
+        'integrators', 'aggregators', 'marketplaces', 'warehouses', 'stores',
+        'shops', 'chains', 'outlets', 'clinics', 'hospitals', 'labs',
+        'e-commerce', 'online', 'digital', 'wholesale', 'logistics'
     ]
     name_lower = entity_name.lower().strip()
     name_words = name_lower.split()
