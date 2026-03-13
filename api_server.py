@@ -961,31 +961,61 @@ import asyncio
 import urllib.parse
 
 DDG_URL = "https://html.duckduckgo.com/html/"
-DDG_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ExpertMap/1.0)"}
 
+# Semaphore to limit concurrent DDG requests (avoid rate limiting)
+_ddg_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent searches
 
 async def ddg_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo and return text snippets."""
-    try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(
-                DDG_URL, params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-            )
-        if resp.status_code != 200:
-            return ""
-        snippets = re.findall(
-            r'class="result__snippet"[^>]*>(.*?)</(?:a|span|td)', resp.text, re.DOTALL
-        )
-        results = []
-        for s in snippets[:max_results]:
-            clean = re.sub(r'<[^>]+>', '', s).strip()
-            for esc, char in [('&amp;', '&'), ('&#x27;', "'"), ('&quot;', '"'), ('&lt;', '<'), ('&gt;', '>')]:
-                clean = clean.replace(esc, char)
-            results.append(clean[:300])
-        return "\n".join(results)
-    except Exception as e:
-        print(f"[DDG] Search error for '{query[:50]}': {e}")
+    """Search DuckDuckGo with multiple fallback methods.
+    Method 1: HTML scraping (fastest, works most of the time)
+    Method 2: duckduckgo-search library (more reliable, slower)"""
+    async with _ddg_semaphore:
+        # Method 1: HTML scraping
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                resp = await client.get(
+                    DDG_URL, params={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                )
+            if resp.status_code == 200 and 'result__snippet' in resp.text:
+                snippets = re.findall(
+                    r'class="result__snippet"[^>]*>(.*?)</(?:a|span|td)', resp.text, re.DOTALL
+                )
+                results = []
+                for s in snippets[:max_results]:
+                    clean = re.sub(r'<[^>]+>', '', s).strip()
+                    for esc, char in [('&amp;', '&'), ('&#x27;', "'"), ('&quot;', '"'), ('&lt;', '<'), ('&gt;', '>')]:
+                        clean = clean.replace(esc, char)
+                    results.append(clean[:300])
+                if results:
+                    return "\n".join(results)
+                # Fall through to Method 2 if no snippets found
+        except Exception as e:
+            print(f"[DDG] HTML method failed for '{query[:50]}': {e}")
+
+        # Method 2: duckduckgo-search library (runs in thread pool to avoid blocking)
+        try:
+            import concurrent.futures
+            from duckduckgo_search import DDGS
+            def _sync_search():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=max_results))
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                lib_results = await asyncio.wait_for(
+                    loop.run_in_executor(pool, _sync_search),
+                    timeout=20.0
+                )
+            if lib_results:
+                parts = []
+                for r in lib_results[:max_results]:
+                    title = r.get('title', '')
+                    body = r.get('body', '')
+                    parts.append(f"{title}: {body}"[:300])
+                return "\n".join(parts)
+        except Exception as e:
+            print(f"[DDG] Library method also failed for '{query[:50]}': {e}")
+
         return ""
 
 
@@ -1021,89 +1051,161 @@ async def web_search_experts(company_name: str, ticker: str, ecosystem: dict,
 
 
 async def verify_and_correct_experts(experts: list, company_name: str, ticker: str) -> list:
-    """Verify experts using web search + LLM cross-check.
-    Step 1: Web search each expert to get real evidence.
-    Step 2: LLM reviews evidence and corrects/removes bad entries."""
+    """BULLETPROOF expert verification. Three-stage pipeline:
+    Stage 1: Multi-query web search per expert (exact name+company, name+role, name alone)
+    Stage 2: Algorithmic pre-filter — if exact name+company search returns nothing, auto-reject
+    Stage 3: LLM reviews remaining candidates with full web evidence using Sonnet
+    
+    Key principle: ONLY keep experts with positive web confirmation.
+    If in doubt, remove. Better to return fewer experts than wrong ones."""
     if not experts:
         return experts
 
     from anthropic import AsyncAnthropic
     client = AsyncAnthropic()
 
-    # Step 1: Web search each expert in parallel for real verification evidence
-    async def _search_expert(e):
+    # ── Stage 1: Multi-query web search per expert ──
+    async def _search_expert_thorough(e):
+        """Run 3 targeted searches per expert for robust evidence."""
         name = e.get('name', '')
         company = e.get('companyAffiliation', '')
-        # Search just the name (avoid middle initials issues)
-        first_last = ' '.join([name.split()[0], name.split()[-1]]) if len(name.split()) >= 2 else name
-        query = f'"{first_last}" {company}'
-        try:
-            result = await ddg_search(query)
-            return (name, result or '')
-        except Exception:
-            return (name, '')
-
-    search_tasks = [_search_expert(e) for e in experts]
-    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
-    web_evidence = {}
-    for r in search_results:
-        if isinstance(r, tuple):
-            web_evidence[r[0]] = r[1][:1500]  # Cap per expert to control prompt size
-            if r[1]:
-                print(f"[VERIFY-WEB] {r[0]}: {len(r[1])} chars of web evidence")
-
-    # Step 2: Build evidence report with web search results
-    expert_json = json.dumps(experts, indent=2)
-
-    evidence_parts = []
-    for i, e in enumerate(experts):
-        name = e.get('name', '')
-        parts = [f"Expert {i+1}: {name}"]
-        parts.append(f"  Claimed: {e.get('currentRole','')} at {e.get('companyAffiliation','')}")
-        if name in web_evidence and web_evidence[name].strip():
-            parts.append(f"  Web search results: {web_evidence[name][:800]}")
+        role = e.get('currentRole', '').split(',')[0].strip()  # Just the title part
+        
+        # Build first/last name (skip middle names/initials)
+        parts = name.split()
+        if len(parts) >= 2:
+            first_last = f"{parts[0]} {parts[-1]}"
         else:
-            parts.append(f"  Web search results: (no results found — this person may not exist or may not be at claimed company)")
+            first_last = name
+        
+        queries = [
+            f'"{first_last}" "{company}"',       # CRITICAL: exact name + exact company — must find something
+            f'{first_last} {company} {role}',     # Looser: name + company + role keywords
+            f'"{first_last}" LinkedIn {company}',  # LinkedIn profile search
+        ]
+        
+        results = {}
+        search_tasks = [ddg_search(q, max_results=5) for q in queries]
+        raw_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+        
+        for q, r in zip(queries, raw_results):
+            if isinstance(r, str) and r.strip():
+                results[q] = r
+        
+        return {
+            'name': name,
+            'company': company,
+            'role': role,
+            'exact_match_found': bool(results.get(queries[0], '').strip()),  # Did exact name+company return results?
+            'any_results_found': any(v.strip() for v in results.values()),
+            'all_evidence': '\n---\n'.join(f"Query: {q}\n{r}" for q, r in results.items() if r.strip()),
+            'name_in_evidence': first_last.lower().split()[-1] in ' '.join(results.values()).lower(),  # Last name appears?
+            'company_in_evidence': any(w.lower() in ' '.join(results.values()).lower() for w in company.split()[:2] if len(w) > 2),
+        }
+
+    print(f"[VERIFY] Starting bulletproof verification of {len(experts)} experts...")
+    search_tasks = [_search_expert_thorough(e) for e in experts]
+    all_evidence = await asyncio.gather(*search_tasks, return_exceptions=True)
+    
+    # ── Stage 2: Algorithmic pre-filter ──
+    # If exact "name" + "company" search returns NOTHING, this person almost certainly
+    # doesn't work at that company. Auto-reject unless loose search has strong signal.
+    candidates = []  # (expert, evidence) tuples that pass pre-filter
+    auto_rejected = []
+    
+    for e, ev in zip(experts, all_evidence):
+        if isinstance(ev, Exception):
+            print(f"[VERIFY] Search failed for {e.get('name')}: {ev} — REMOVING (search failure)")
+            auto_rejected.append(e.get('name', '?'))
+            continue
+        
+        name = ev['name']
+        
+        # AUTO-REJECT: No exact match AND (name or company not in any results)
+        if not ev['exact_match_found']:
+            if not ev['name_in_evidence'] or not ev['company_in_evidence']:
+                print(f"[VERIFY] AUTO-REJECT: {name} — no exact match for name+company, and name/company not found in loose search results")
+                auto_rejected.append(name)
+                continue
+            elif not ev['any_results_found']:
+                print(f"[VERIFY] AUTO-REJECT: {name} — zero web results across all queries")
+                auto_rejected.append(name)
+                continue
+            else:
+                print(f"[VERIFY] WEAK MATCH: {name} — no exact match but name+company appear in loose results, sending to LLM review")
+        else:
+            print(f"[VERIFY] STRONG MATCH: {name} — exact name+company search returned results")
+        
+        candidates.append((e, ev))
+    
+    if auto_rejected:
+        print(f"[VERIFY] Auto-rejected {len(auto_rejected)} experts: {', '.join(auto_rejected)}")
+    
+    if not candidates:
+        print(f"[VERIFY] All {len(experts)} experts failed pre-filter — returning empty list")
+        return []
+    
+    # ── Stage 3: LLM verification with Sonnet ──
+    expert_json = json.dumps([c[0] for c in candidates], indent=2)
+    
+    evidence_parts = []
+    for i, (e, ev) in enumerate(candidates):
+        parts = [f"Expert {i+1}: {ev['name']}"]
+        parts.append(f"  Claimed: {ev['role']} at {ev['company']}")
+        parts.append(f"  Exact name+company search found results: {ev['exact_match_found']}")
+        parts.append(f"  Person's last name appears in results: {ev['name_in_evidence']}")
+        parts.append(f"  Company name appears in results: {ev['company_in_evidence']}")
+        if ev['all_evidence']:
+            parts.append(f"  Web evidence:\n{ev['all_evidence'][:1200]}")
+        else:
+            parts.append(f"  Web evidence: (none found)")
         evidence_parts.append("\n".join(parts))
-
+    
     evidence_text = "\n\n".join(evidence_parts)
-    print(f"[VERIFY] Built evidence report ({len(evidence_text)} chars) with web search for {len(experts)} experts")
+    print(f"[VERIFY] LLM reviewing {len(candidates)} candidates (evidence: {len(evidence_text)} chars)")
+    
+    correction_prompt = f"""You are a strict fact-checker reviewing expert profiles against web search evidence.
 
-    correction_prompt = f"""You are reviewing an expert list for accuracy. For each expert, I have web search evidence.
+CRITICAL: Our users are professional investors. A SINGLE wrong name, wrong company, or wrong title destroys trust.
+When in doubt, REMOVE the expert. It is far better to return 2 verified experts than 5 questionable ones.
 
-RULES (in priority order):
-1. WRONG COMPANY is the #1 disqualifier. If web search shows the person works at a DIFFERENT company than listed, you MUST either:
-   a. CORRECT the companyAffiliation, currentRole, ecosystemNode, and connectionToCompany to reflect their ACTUAL company, OR
-   b. REMOVE them (set remove=true) if the corrected company is irrelevant to the research context.
-2. If web search shows someone is CEO, CFO, COO, or CTO of a publicly traded company, REMOVE them (set remove=true).
-3. If NO web evidence exists for a person (no search results at all), REMOVE them (set remove=true) — they are likely fabricated.
-4. If web search confirms the person at the correct company with the correct role, keep them.
-5. companyAffiliation MUST match where they ACTUALLY work according to web evidence. This is critical — an expert listed under the wrong company destroys user trust.
-6. If a person's actual company is different but still relevant (e.g., competitor, supplier, customer of the target), CORRECT the entry. If irrelevant, REMOVE.
-7. currentRole must match what web evidence shows. If the web shows a different title, update it.
+For each expert below, I ran web searches. Decide: KEEP (verified) or REMOVE (unverified/wrong).
 
-=== EXPERT LIST ===
+REMOVAL RULES (remove if ANY apply):
+1. Web evidence does NOT confirm this specific person at this specific company → REMOVE
+2. Web evidence shows person at a DIFFERENT company than claimed → REMOVE  
+3. Web evidence shows a different title than claimed and you cannot determine the real title → REMOVE
+4. Person appears to be CEO/CFO/COO/CTO of a publicly traded company → REMOVE
+5. The web evidence is about a DIFFERENT person with the same name (common name, different industry) → REMOVE
+6. You have ANY uncertainty about whether this is the right person → REMOVE
+
+KEEP RULES (keep ONLY if ALL apply):
+1. Web evidence clearly confirms this specific person exists
+2. Web evidence confirms they work (or recently worked) at the claimed company
+3. Their role/title in the evidence is consistent with (doesn't have to be exact match of) the claimed role
+
+If you keep someone but their title needs updating based on evidence, update currentRole and companyAffiliation to match the evidence EXACTLY.
+
+=== CANDIDATES ===
 {expert_json}
-=== END LIST ===
+=== END CANDIDATES ===
 
 === VERIFICATION EVIDENCE ===
 {evidence_text}
 === END EVIDENCE ===
 
-Return a JSON array. For each expert:
-- Keep all original fields
-- Update currentRole/companyAffiliation if evidence shows different
-- Set "remove": true for C-suite at public companies or clearly wrong people
-- Add "verificationNote" with brief explanation
-- NEVER include annotations like "(approx.)", "(unverified)", "(estimated)", or "(private)" in ANY field. All data must be clean text.
-- companyAffiliation must be the EXACT real company name — no tickers, no annotations, no guesses.
+Return a JSON array. For EACH candidate:
+- Set "remove": true if the person should be removed (with "verificationNote" explaining why)
+- Set "remove": false if the person is verified (with "verificationNote" confirming what evidence supports them)
+- Update currentRole and companyAffiliation to match web evidence if they differ
+- NEVER include annotations like "(approx.)", "(unverified)", or "(estimated)" in any field
 
-Return ONLY valid JSON array."""
+Return ONLY a valid JSON array. Start with [ end with ]."""
 
     try:
         msg = await client.messages.create(
             model="claude-sonnet-4-6", max_tokens=8192,
-            system="You output ONLY valid JSON arrays. No preamble, no commentary, no markdown. Start with [ end with ]. Your job is to verify experts against web search evidence. Be strict — remove anyone not confirmed by web evidence.",
+            system="You output ONLY valid JSON arrays. No preamble. Start with [ end with ]. You are an extremely strict fact-checker. Your default action is REMOVE. Only KEEP experts with clear, unambiguous web evidence confirming their identity, company, and role.",
             messages=[{"role": "user", "content": correction_prompt}]
         )
         raw = msg.content[0].text
@@ -1111,24 +1213,24 @@ Return ONLY valid JSON array."""
         if isinstance(corrected, dict) and "experts" in corrected:
             corrected = corrected["experts"]
         if not isinstance(corrected, list):
-            print(f"[VERIFY] Correction returned non-list, keeping originals")
-            return experts
+            print(f"[VERIFY] LLM returned non-list — returning empty (safety first)")
+            return []
 
         result = []
         for e in corrected:
-            if e.get("remove"):
-                print(f"[VERIFY] Removed: {e.get('name')} — {e.get('verificationNote', 'no reason')}")
+            if e.get("remove", True):  # DEFAULT TO REMOVE if field missing
+                print(f"[VERIFY] LLM REMOVED: {e.get('name')} — {e.get('verificationNote', 'no reason')}")
                 continue
             e.pop("remove", None)
+            e.pop("verificationNote", None)
             result.append(e)
 
-        print(f"[VERIFY] Result: {len(result)} experts after verification (started with {len(experts)})")
-        final = sanitize_experts(result if result else experts)
-        return final
+        print(f"[VERIFY] FINAL: {len(result)} verified experts (started with {len(experts)}, {len(auto_rejected)} auto-rejected, {len(candidates)-len(result)} LLM-rejected)")
+        return sanitize_experts(result)
 
     except Exception as e:
-        print(f"[VERIFY] Correction failed: {e}, keeping originals")
-        return sanitize_experts(experts)
+        print(f"[VERIFY] LLM verification failed: {e} — returning empty list (safety first)")
+        return []
 
 
 # ============================================================
@@ -1633,11 +1735,12 @@ async def get_experts(ticker: str):
         print(f"[EXPERTS] Web search for {ticker} ({company['name']})...")
         ctx = await web_search_experts(company["name"], ticker, company)
         print(f"[EXPERTS] Generating profiles for {ticker}...")
-        experts = await generate_expert_profiles(ticker, company["name"], company, ctx, count=10)
+        experts = await generate_expert_profiles(ticker, company["name"], company, ctx, count=15)  # Over-generate for filtering
         print(f"[EXPERTS] {ticker}: {len(experts)} candidates, now verifying...")
 
         # VERIFICATION PASS: check each expert against web search
         experts = await verify_and_correct_experts(experts, company["name"], ticker)
+        experts = experts[:10]  # Cap at 10 after verification
 
         experts_cache[ticker] = experts
         print(f"[EXPERTS] {ticker}: {len(experts)} verified experts")
@@ -1864,8 +1967,9 @@ async def get_company_full(ticker: str, request: Request):
     async def _bg_expert_gen():
         try:
             ctx = await web_search_experts(company["name"], ticker, company)
-            experts = await generate_expert_profiles(ticker, company["name"], company, ctx, count=10)
+            experts = await generate_expert_profiles(ticker, company["name"], company, ctx, count=15)
             experts = await verify_and_correct_experts(experts, company["name"], ticker)
+            experts = experts[:10]
             save_both(experts_cache, "experts", ticker, experts)
             print(f"[BG-EXPERTS] {ticker}: {len(experts)} experts ready")
             # Also kick off deeper prefetch
@@ -2184,7 +2288,7 @@ These should be VP/Director/Senior Director-level people who:
 - Have since left the company
 - Are real, publicly known individuals (verifiable via LinkedIn, press, SEC)
 
-Return up to 5 candidates. If the web research above names specific people, use those names and titles EXACTLY. For remaining slots, use your knowledge of publicly known VP/Director-level professionals who previously worked at {company_name}.
+Return up to 10 candidates. If the web research above names specific people, use those names and titles EXACTLY. For remaining slots, use your knowledge of publicly known VP/Director-level professionals who previously worked at {company_name}. Over-generate candidates — a strict verification step will filter out anyone we can't confirm.
 
 CRITICAL ACCURACY RULES:
 - companyAffiliation must be the EXACT company where the person CURRENTLY works. Getting this wrong is unacceptable.
@@ -2233,11 +2337,11 @@ Source people from LinkedIn profiles, SEC filings, press releases, and conferenc
                 e.setdefault("linkedinUrl", "")
                 e.setdefault("sourceNote", "")
                 e.setdefault("currentRole", "")
-            sanitized = sanitize_experts(experts[:5])
+            sanitized = sanitize_experts(experts[:10])  # Over-generate, verification will filter
             # VERIFICATION PASS: web search + Sonnet cross-check
             print(f"[EXEC-EXPERTS] Verifying {len(sanitized)} experts for {exec_name}...")
             verified = await verify_and_correct_experts(sanitized, company_name, ticker)
-            return verified
+            return verified[:5]  # Return max 5 after verification
         except (json.JSONDecodeError, ValueError) as e:
             print(f"[EXEC-EXPERTS] Attempt {attempt+1} ({model}) failed: {e}")
     return []
@@ -2596,7 +2700,7 @@ async def _generate_entity_experts_for_company(entity_name: str, entity_type: st
 
     c_suite_rule = "C-Suite (CEO, CFO, COO, etc.) is allowed for private companies." if is_likely_private else "NO C-Suite from public companies (VP/SVP/EVP/Director only). C-level OK for private companies."
 
-    prompt = f"""Generate up to 3 expert profiles of senior individuals at {entity_name} relevant to researching {parent_company} ({parent_ticker}).
+    prompt = f"""Generate up to 8 expert profiles of senior individuals at {entity_name} relevant to researching {parent_company} ({parent_ticker}).
 
 Relationship: {entity_name} is a {entity_type} of {parent_company}.
 
@@ -2643,11 +2747,11 @@ Source people from LinkedIn profiles, SEC filings, press releases, and conferenc
                     e.setdefault("linkedinUrl", "")
                     e.setdefault("sourceNote", "")
                     e.setdefault("companyAffiliation", entity_name)
-                sanitized = sanitize_experts(experts[:5])
+                sanitized = sanitize_experts(experts[:8])  # Over-generate, verification will filter
                 # VERIFICATION PASS: web search + Sonnet cross-check
                 print(f"[ENTITY-EXPERTS] Verifying {len(sanitized)} experts for {entity_name}...")
                 verified = await verify_and_correct_experts(sanitized, entity_name, parent_ticker)
-                return verified
+                return verified[:5]  # Return max 5 after verification
             # Empty list from this model — try next model
             print(f"[ENTITY-EXPERTS] Attempt {attempt+1} ({model}): empty result, trying next model")
         except (json.JSONDecodeError, ValueError) as e:
