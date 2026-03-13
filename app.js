@@ -797,7 +797,8 @@ function EntityExpertsPanel({ entityName, entityType, parentTicker, parentCompan
           experts.map(e =>
             React.createElement('div', { key: e.id, className: 'bg-white/[0.03] rounded-xl border border-white/5 p-4' },
               React.createElement(ExpertName, { expert: e, className: 'text-sm font-medium text-white' }),
-              React.createElement('div', { className: 'text-[11px] text-gray-400 mt-0.5' }, formatCurrentRole(e)),
+              e.companyAffiliation && React.createElement('div', { className: 'text-[11px] text-teal-400/80 font-medium mt-0.5' }, e.companyAffiliation),
+              React.createElement('div', { className: 'text-[11px] text-gray-400 mt-0.5' }, e.currentRole || formatCurrentRole(e)),
               e.formerRole && e.formerRole !== 'N/A' && React.createElement('div', { className: 'text-[11px] text-gray-500 mt-0.5' },
                 React.createElement('span', { className: 'text-gray-400' }, 'Formerly: '), e.formerRole
               ),
@@ -885,7 +886,8 @@ function ExecExpertsPanel({ exec, ticker, companyName, onClose }) {
           experts.map(e =>
             React.createElement('div', { key: e.id, className: 'bg-white/[0.03] rounded-xl border border-white/5 p-4' },
               React.createElement(ExpertName, { expert: e, className: 'text-sm font-medium text-white' }),
-              React.createElement('div', { className: 'text-[11px] text-gray-400 mt-0.5' }, formatCurrentRole(e)),
+              e.companyAffiliation && React.createElement('div', { className: 'text-[11px] text-teal-400/80 font-medium mt-0.5' }, e.companyAffiliation),
+              React.createElement('div', { className: 'text-[11px] text-gray-400 mt-0.5' }, e.currentRole || formatCurrentRole(e)),
               e.formerRole && e.formerRole !== 'N/A' && React.createElement('div', { className: 'text-[11px] text-gray-500 mt-0.5' },
                 React.createElement('span', { className: 'text-gray-400' }, 'Formerly: '), e.formerRole
               ),
@@ -1583,7 +1585,8 @@ function ExpertDetailPanel({ expert, onClose }) {
         React.createElement('div', { className: 'flex items-start justify-between' },
           React.createElement('div', { className: 'flex-1 min-w-0 pr-4' },
             React.createElement('h2', { className: 'text-lg font-semibold text-white truncate' }, expert.name),
-            React.createElement('p', { className: 'text-sm text-gray-400 mt-0.5 truncate' }, formatCurrentRole(expert))
+            expert.companyAffiliation && React.createElement('p', { className: 'text-sm text-teal-400/80 mt-0.5 truncate font-medium' }, expert.companyAffiliation),
+            React.createElement('p', { className: 'text-sm text-gray-400 mt-0.5 truncate' }, expert.currentRole || formatCurrentRole(expert))
           ),
           React.createElement('button', {
             onClick: onClose,
@@ -1613,8 +1616,12 @@ function ExpertDetailPanel({ expert, onClose }) {
           React.createElement('h4', { className: 'text-[10px] text-gray-500 uppercase tracking-wider mb-2' }, 'Relevant Experience'),
           React.createElement('div', { className: 'bg-white/[0.03] rounded-lg border border-white/5 p-3 space-y-2' },
             React.createElement('div', { className: 'flex items-start gap-2' },
+              React.createElement('span', { className: 'text-[10px] text-gray-500 shrink-0 w-16 uppercase mt-0.5' }, 'Company'),
+              React.createElement('span', { className: 'text-[13px] text-teal-400/90 font-medium' }, expert.companyAffiliation || 'Not specified')
+            ),
+            React.createElement('div', { className: 'flex items-start gap-2' },
               React.createElement('span', { className: 'text-[10px] text-gray-500 shrink-0 w-16 uppercase mt-0.5' }, 'Current'),
-              React.createElement('span', { className: 'text-[13px] text-gray-200' }, formatCurrentRole(expert))
+              React.createElement('span', { className: 'text-[13px] text-gray-200' }, expert.currentRole || formatCurrentRole(expert))
             ),
             expert.formerRole && expert.formerRole !== 'N/A' && React.createElement('div', { className: 'flex items-start gap-2' },
               React.createElement('span', { className: 'text-[10px] text-gray-500 shrink-0 w-16 uppercase mt-0.5' }, 'Former'),
