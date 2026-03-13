@@ -1703,7 +1703,6 @@ async def prefetch_all(ticker: str, company: dict, executives: list, experts: li
         async with sem:
             try:
                 exp = await generate_entity_experts(entity_name, entity_type, company_name, ticker)
-                exp = await verify_and_correct_experts(exp, company_name, ticker)
                 save_both(entity_experts_cache, "ent_exp", cache_key, exp)
                 all_exp = experts_cache.get(ticker, [])
                 for e in exp:
@@ -1781,11 +1780,26 @@ async def get_company_full(ticker: str, request: Request):
             keys_to_remove = [k for k in cache if k == ticker or k.startswith(f"{ticker}:")]
             for k in keys_to_remove:
                 del cache[k]
-        # Also clear disk cache for this ticker
-        for prefix in ["company", "experts", "execs", "questions", "ent_exp", "exec_exp", "former_emp"]:
+        # Also clear disk cache for this ticker (exact key + compound keys like "TICKER:entity")
+        # First clear exact ticker keys
+        for prefix in ["company", "experts", "execs", "questions", "ent_exp", "exec_exp", "former_emp", "topic_exp"]:
             p = _cache_path(prefix, ticker)
             if p.exists():
                 p.unlink()
+        # Then clear compound keys (ticker:subkey) disk files
+        compound_caches = [
+            (entity_experts_cache, "ent_exp"),
+            (exec_experts_cache, "exec_exp"),
+            (questions_cache, "questions"),
+        ]
+        if 'topic_experts_cache' in globals():
+            compound_caches.append((topic_experts_cache, "topic_exp"))
+        for cache, prefix in compound_caches:
+            for k in list(cache.keys()):
+                if k == ticker or k.startswith(f"{ticker}:"):
+                    dp = _cache_path(prefix, k)
+                    if dp.exists():
+                        dp.unlink()
         # Clear prefetch status
         prefetch_status.pop(ticker, None)
 
