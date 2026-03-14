@@ -7,12 +7,22 @@ import { createRoot } from 'react-dom/client';
 const API_BASE = window.__API_BASE__ || '';
 
 async function apiFetch(path, opts = {}) {
-  const res = await fetch(`${API_BASE}${path}`, opts);
-  if (!res.ok) {
-    const err = await res.text().catch(() => 'Unknown error');
-    throw new Error(`API error ${res.status}: ${err}`);
+  // 3-minute timeout for long-running expert generation + verification
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 180000);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, { ...opts, signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      const err = await res.text().catch(() => 'Unknown error');
+      throw new Error(`API error ${res.status}: ${err}`);
+    }
+    return res.json();
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === 'AbortError') throw new Error('Request timed out — please try again');
+    throw e;
   }
-  return res.json();
 }
 
 // ============================================================
@@ -789,8 +799,14 @@ function EntityExpertsPanel({ entityName, entityType, parentTicker, parentCompan
       ),
       // Content
       React.createElement('div', { className: 'px-6 py-5' },
-        loading && React.createElement(LoadingSpinner, { message: `Finding experts at ${displayName}...` }),
-        error && React.createElement('p', { className: 'text-sm text-red-400' }, `Error: ${error}`),
+        loading && React.createElement(LoadingSpinner, { message: `Finding and verifying experts at ${displayName}... This can take up to a minute.` }),
+        error && React.createElement('div', { className: 'text-center py-6' },
+          React.createElement('p', { className: 'text-sm text-red-400 mb-3' }, `Error: ${error}`),
+          React.createElement('button', {
+            onClick: () => { setError(null); setLoading(true); apiFetch('/api/entity-experts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entityName, entityType, parentTicker }) }).then(data => { let el = data?.experts || data; setExperts(Array.isArray(el) ? el : []); setLoading(false); }).catch(err => { setError(err.message); setLoading(false); }); },
+            className: 'px-4 py-2 rounded-lg text-sm font-medium bg-teal-500/10 text-teal-400 border border-teal-500/20 hover:bg-teal-500/20 transition-colors'
+          }, 'Retry')
+        ),
         experts && experts.length === 0 && React.createElement('p', { className: 'text-sm text-gray-500' }, 'No experts found.'),
         experts && experts.length > 0 && React.createElement('div', { className: 'space-y-3' },
           React.createElement('p', { className: 'text-xs text-gray-500 uppercase tracking-wider mb-3' }, `${experts.length} Experts Found`),
